@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!--
+        PRIVILEGED SYSTEM APP REQUIREMENTS:
+
+        1. APK MUST be signed with the device platform key (see app/build.gradle.kts).
+        2. APK MUST be placed in /system/priv-app/LogDaemon/ on the device.
+        3. A privapp-permissions XML must whitelist the protected permissions
+           (see README — install at /system/etc/permissions/).
+
+        DO NOT use android:sharedUserId="android.uid.system".
+        Since Android 10, sharedUserId is immutable post-install, and since
+        Android 13, no app declaring it can be installed after the firmware
+        image is built. You will see:
+            INSTALL_FAILED_SHARED_USER_INCOMPATIBLE
+            "bad user id, non-preload app"
+
+        Platform-signed + /system/priv-app/ + privapp-permissions whitelist
+        gives us everything we need for this daemon WITHOUT sharedUserId.
+    -->
+
+    <uses-permission android:name="android.permission.READ_LOGS"
+        tools:ignore="ProtectedPermissions" />
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.WRITE_MEDIA_STORAGE"
+        tools:ignore="ProtectedPermissions" />
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
+        tools:ignore="ScopedStorage" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+
+    <application
+        android:name=".LogDaemonApp"
+        android:allowBackup="false"
+        android:label="@string/app_name"
+        android:persistent="true"
+        android:directBootAware="true"
+        tools:ignore="AllowBackup">
+
+        <!-- Boot receiver: starts the service when the device boots -->
+        <receiver
+            android:name=".BootReceiver"
+            android:enabled="true"
+            android:exported="true"
+            android:directBootAware="true">
+            <intent-filter android:priority="999">
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- USB attach/detach receiver -->
+        <receiver
+            android:name=".usb.UsbStateReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
+                <action android:name="android.hardware.usb.action.USB_DEVICE_DETACHED" />
+                <action android:name="android.intent.action.MEDIA_MOUNTED" />
+                <action android:name="android.intent.action.MEDIA_UNMOUNTED" />
+                <action android:name="android.intent.action.MEDIA_EJECT" />
+                <action android:name="android.intent.action.MEDIA_REMOVED" />
+                <data android:scheme="file" />
+            </intent-filter>
+        </receiver>
+
+        <!--
+            The daemon service.
+            stopWithTask=false ensures it isn't killed if a (non-existent) UI task closes.
+            No <intent-filter> for LAUNCHER => no launcher icon, no notification.
+        -->
+        <service
+            android:name=".LogDaemonService"
+            android:enabled="true"
+            android:exported="false"
+            android:stopWithTask="false"
+            android:directBootAware="true" />
+
+    </application>
+
+</manifest>
