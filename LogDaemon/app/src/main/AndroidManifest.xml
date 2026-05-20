@@ -45,6 +45,7 @@
             android:name=".BootReceiver"
             android:enabled="true"
             android:exported="true"
+            android:singleUser="true"
             android:directBootAware="true">
             <intent-filter android:priority="999">
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
@@ -57,7 +58,8 @@
         <receiver
             android:name=".usb.UsbStateReceiver"
             android:enabled="true"
-            android:exported="true">
+            android:exported="true"
+            android:singleUser="true">
             <intent-filter>
                 <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
                 <action android:name="android.hardware.usb.action.USB_DEVICE_DETACHED" />
@@ -78,6 +80,7 @@
             android:name=".LogDaemonService"
             android:enabled="true"
             android:exported="false"
+            android:singleUser="true"
             android:stopWithTask="false"
             android:directBootAware="true" />
 
