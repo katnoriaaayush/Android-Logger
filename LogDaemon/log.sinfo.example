@@ -1,0 +1,32 @@
+# =============================================================================
+# Log Daemon Configuration
+# =============================================================================
+# Place this file at the root of a USB drive named "log.sinfo".
+# When the USB is attached to the device, the daemon will start collecting
+# logs for the packages listed below and write them to /usb_root/logs/<timestamp>/
+#
+# Format: INI-style
+#   - Lines starting with # or ; are comments
+#   - Blank lines are ignored
+#   - Sections are in [brackets]
+#   - Unknown options/sections are ignored (forward-compatible)
+# =============================================================================
+
+[packages]
+# One package name per line.
+# Invalid package names are skipped with a warning in _session.meta.
+com.company.mainapp
+com.company.launcher
+com.company.settings
+
+[options]
+# Minimum log level to capture: V, D, I, W, E
+# (logs below this level are dropped at logcat itself for efficiency)
+min_level=D
+
+# Whether to include system framework logs in addition to the listed packages
+# (default: false). Currently advisory — system logs are not yet filtered in.
+include_system_logs=false
+
+# Logcat buffer size hint in KB (default: 4096)
+buffer_size_kb=4096
