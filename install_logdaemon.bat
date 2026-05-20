@@ -30,7 +30,6 @@ if not exist "%APK_LOCAL%" (
     echo           cd LogDaemon
     echo           gradlew :app:assembleRelease
     echo.
-    pause
     exit /b 1
 )
 
@@ -40,7 +39,6 @@ if errorlevel 1 (
     echo [ERROR] adb not found on PATH.
     echo         Install Android SDK platform-tools and add to PATH.
     echo.
-    pause
     exit /b 1
 )
 
@@ -49,7 +47,6 @@ echo [1/8] Waiting for device...
 adb wait-for-device
 if errorlevel 1 (
     echo [ERROR] No device detected.
-    pause
     exit /b 1
 )
 
@@ -65,7 +62,6 @@ echo [2/8] Requesting root...
 adb root
 if errorlevel 1 (
     echo [ERROR] "adb root" failed. Device may not be rooted or root is disabled.
-    pause
     exit /b 1
 )
 :: Give adbd time to restart as root
@@ -74,12 +70,13 @@ timeout /t 2 /nobreak >nul
 :: --- Remount system partition ------------------------------------------------
 echo [3/8] Remounting system partition read-write...
 adb remount
+:: Some devices return non-zero even on a successful remount (e.g. dm-verity
+:: warning). Capture the result but treat it as a warning, not a hard stop.
 if errorlevel 1 (
-    echo [ERROR] "adb remount" failed.
-    echo         On some devices you may need to run:
-    echo           adb disable-verity  (then reboot and re-run this script)
-    pause
-    exit /b 1
+    echo [WARN] "adb remount" returned a non-zero exit code.
+    echo        If the push fails below, run:
+    echo          adb disable-verity
+    echo        then reboot the device and re-run this script.
 )
 timeout /t 1 /nobreak >nul
 
@@ -92,7 +89,6 @@ echo [5/8] Pushing APK...
 adb push "%APK_LOCAL%" "%DEVICE_APK%"
 if errorlevel 1 (
     echo [ERROR] Push failed.
-    pause
     exit /b 1
 )
 
