@@ -13,6 +13,24 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "1.0"
+
+        externalNativeBuild {
+            cmake {
+                cFlags("-O2", "-Wall", "-Wextra")
+            }
+        }
+        ndk {
+            // Target the ABIs you expect on the device. Samsung Android 14
+            // devices are arm64-v8a. Add armeabi-v7a if 32-bit support needed.
+            abiFilters += listOf("arm64-v8a")
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
     }
 
     // IMPORTANT: This APK must be signed with the platform key
