@@ -13,13 +13,18 @@ import java.io.File
 import java.io.InputStreamReader
 
 /**
- * Collects logcat output for a single package.
+ * Collects logcat output for a single package across all Android user profiles.
  *
- * Filters by PID, not UID, because apps sharing the system UID (1000)
- * cannot be distinguished from other system services by UID alone.
+ * Filters by PID, not UID, because apps sharing the system UID (1000) cannot be
+ * distinguished from other system services by UID alone.
  *
- * Auto-recovers if the target app crashes or restarts: detects PID change
- * and re-attaches logcat to the new PID without dropping the session.
+ * On a multi-user device each active user profile runs its own instance of the
+ * package as a separate process (same package name, same UID, different PID).
+ * resolveAllPids() finds every such process so that a single logcat command
+ * covers owner + all user profiles simultaneously.
+ *
+ * Auto-recovers when all instances die: the outer loop re-polls for PIDs and
+ * re-attaches logcat once any instance restarts.
  */
 class PackageLogCollector(
     val packageName: String,
@@ -42,11 +47,6 @@ class PackageLogCollector(
         job = scope.launch(Dispatchers.IO) { runLoop() }
     }
 
-    /**
-     * Outer loop: resolves the current PID for the package, runs logcat
-     * against that PID, and restarts the inner attach if the process dies
-     * or restarts during the session.
-     */
     private suspend fun runLoop() {
         val logcatPath = findLogcatBinary()
         if (logcatPath == null) {
@@ -59,29 +59,30 @@ class PackageLogCollector(
         var totalParsed = 0L
 
         while (running) {
-            val pid = waitForPid() ?: break
-            Log.i(TAG, "[$packageName] attaching to pid=$pid")
+            val pids = waitForAnyPids() ?: break
+            Log.i(TAG, "[$packageName] attaching to ${pids.size} pid(s): $pids")
 
-            val (read, parsed) = attachToPid(logcatPath, pid)
+            val (read, parsed) = attachToPids(logcatPath, pids)
             totalRead += read
             totalParsed += parsed
 
             if (!running) break
-            Log.i(TAG, "[$packageName] pid=$pid disappeared — watching for restart")
+            Log.i(TAG, "[$packageName] all pids gone, watching for restart")
         }
 
         Log.i(TAG, "[$packageName] collector stopped — total: read=$totalRead parsed=$totalParsed")
     }
 
     /**
-     * Polls every PID_POLL_INTERVAL_MS for the target package's PID.
-     * Returns the PID when found, or null if running was set to false.
+     * Polls until at least one instance of the package is running (owner or
+     * any user profile). Returns all PIDs found in that poll, or null if
+     * stop() was called before any process appeared.
      */
-    private suspend fun waitForPid(): Int? {
+    private suspend fun waitForAnyPids(): List<Int>? {
         var attempt = 0
         while (running) {
-            val pid = resolvePid(packageName)
-            if (pid != null) return pid
+            val pids = resolveAllPids(packageName)
+            if (pids.isNotEmpty()) return pids
             attempt++
             if (attempt == 1 || attempt % 20 == 0) {
                 Log.d(TAG, "[$packageName] waiting for process to start (attempt $attempt)")
@@ -92,45 +93,44 @@ class PackageLogCollector(
     }
 
     /**
-     * Resolves the PID of the given package by reading /proc.
+     * Returns the PIDs of every running process whose cmdline matches the
+     * given package name (one entry per active Android user profile).
      *
-     * Walks /proc/<pid>/cmdline for each numeric directory, matches against
-     * the target package name.
-     *
-     * Process names look like:
-     *   - "com.your.app"               (main process)
-     *   - "com.your.app:remote"        (private process)
-     * We accept the main one (no colon).
+     * Process names in /proc/<pid>/cmdline look like:
+     *   "com.your.app"         (main process)
+     *   "com.your.app:remote"  (private process)
+     * Only the main process (no colon suffix) is matched.
      */
-    private fun resolvePid(pkg: String): Int? {
-        val procDir = File("/proc")
-        val pids = procDir.listFiles { f -> f.isDirectory && f.name.all(Char::isDigit) } ?: return null
-        for (dir in pids) {
+    private fun resolveAllPids(pkg: String): List<Int> {
+        val result = mutableListOf<Int>()
+        val dirs = File("/proc").listFiles { f -> f.isDirectory && f.name.all(Char::isDigit) }
+            ?: return result
+        for (dir in dirs) {
             try {
                 val cmdline = File(dir, "cmdline").readText().trimEnd('\u0000')
-                val procName = cmdline.substringBefore(':')
-                if (procName == pkg) {
-                    return dir.name.toInt()
+                if (cmdline.substringBefore(':') == pkg) {
+                    result.add(dir.name.toInt())
                 }
             } catch (_: Exception) {
-                // Process may have died between listing and reading
+                // process may have died between listing and reading
             }
         }
-        return null
+        return result
     }
 
     /**
-     * Runs logcat filtered by PID and pumps lines into the writers.
-     * Returns when the logcat process exits (target process died or stop()
+     * Runs logcat filtered by all supplied PIDs and pumps lines into the writers.
+     * One --pid flag per PID covers owner + every user-profile instance in a single
+     * logcat invocation. Returns when logcat exits (all processes died or stop()
      * was called).
      */
-    private fun attachToPid(logcatPath: String, pid: Int): Pair<Long, Long> {
-        val command = listOf(
-            logcatPath,
-            "-v", "threadtime",
-            "--pid=$pid",
-            "*:$minLevel"
-        )
+    private fun attachToPids(logcatPath: String, pids: List<Int>): Pair<Long, Long> {
+        val command = buildList {
+            add(logcatPath)
+            add("-v"); add("threadtime")
+            pids.forEach { add("--pid=$it") }
+            add("*:$minLevel")
+        }
 
         var read = 0L
         var parsed = 0L
@@ -175,7 +175,7 @@ class PackageLogCollector(
                 }
 
                 if (parsed % 100L == 0L) {
-                    Log.d(TAG, "[$packageName] progress: read=$read parsed=$parsed rejected=$rejected (pid=$pid)")
+                    Log.d(TAG, "[$packageName] progress: read=$read parsed=$parsed rejected=$rejected")
                 }
             }
             reader.close()
@@ -185,7 +185,7 @@ class PackageLogCollector(
             try { process?.destroy() } catch (_: Exception) {}
             process = null
         }
-        Log.i(TAG, "[$packageName] detached from pid=$pid (read=$read parsed=$parsed rejected=$rejected)")
+        Log.i(TAG, "[$packageName] detached (read=$read parsed=$parsed rejected=$rejected)")
         return read to parsed
     }
 
