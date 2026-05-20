@@ -39,6 +39,7 @@ class LogDaemonService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        LogDaemonApp.serviceRunning = true
         Log.i(TAG, "LogDaemonService created")
     }
 
@@ -133,6 +134,7 @@ class LogDaemonService : Service() {
     }
 
     override fun onDestroy() {
+        LogDaemonApp.serviceRunning = false
         Log.i(TAG, "LogDaemonService destroyed")
         currentSession?.stop()
         currentSession = null

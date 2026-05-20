@@ -6,10 +6,13 @@ import android.util.Log
 class LogDaemonApp : Application() {
     override fun onCreate() {
         super.onCreate()
-        Log.i(TAG, "LogDaemonApp.onCreate (persistent system app)")
+        Log.i(TAG, "LogDaemonApp.onCreate (system app)")
     }
 
     companion object {
         const val TAG = "LogDaemon"
+
+        @Volatile
+        var serviceRunning = false
     }
 }

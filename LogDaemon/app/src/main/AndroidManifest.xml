@@ -36,7 +36,6 @@
         android:name=".LogDaemonApp"
         android:allowBackup="false"
         android:label="@string/app_name"
-        android:persistent="true"
         android:directBootAware="true"
         tools:ignore="AllowBackup">
 

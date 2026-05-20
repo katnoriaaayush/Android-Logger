@@ -17,6 +17,10 @@ class BootReceiver : BroadcastReceiver() {
             Intent.ACTION_BOOT_COMPLETED,
             Intent.ACTION_LOCKED_BOOT_COMPLETED,
             Intent.ACTION_MY_PACKAGE_REPLACED -> {
+                if (LogDaemonApp.serviceRunning) {
+                    Log.i(TAG, "Service already running — skipping start")
+                    return
+                }
                 val serviceIntent = Intent(context, LogDaemonService::class.java)
                 context.startService(serviceIntent)
                 Log.i(TAG, "LogDaemonService start requested")
