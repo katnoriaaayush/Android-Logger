@@ -39,9 +39,8 @@ class LogDaemonService : Service() {
         super.onCreate()
         LogDaemonApp.serviceRunning = true
         Log.i(TAG, "LogDaemonService created")
-        // Self-heal: if we restarted (e.g. profile switch killed the service)
-        // and the USB is still present, re-check whether the helper is running.
         resumeIfUsbPresent()
+        startHelperWatchdog()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -87,7 +86,26 @@ class LogDaemonService : Service() {
                 return@launch
             }
 
+            // Give a helper that is dying (write-failed on USB unmount during profile
+            // switch) time to finish its cleanup and remove the PID file, so
+            // isHelperAlive() returns the correct result.
+            delay(HELPER_DEATH_GRACE_MS)
             ensureHelperRunning(root)
+        }
+    }
+
+    private fun startHelperWatchdog() {
+        daemonScope.launch {
+            while (true) {
+                delay(WATCHDOG_INTERVAL_MS)
+                val path = currentUsbPath ?: continue
+                if (!isHelperAlive(path)) {
+                    Log.i(TAG, "Watchdog: helper dead, relaunching")
+                    val root = UsbMountLocator.findUsbWithConfig(this@LogDaemonService)
+                        ?: continue
+                    ensureHelperRunning(root)
+                }
+            }
         }
     }
 
@@ -154,5 +172,7 @@ class LogDaemonService : Service() {
         private const val MOUNT_POLL_ATTEMPTS = 10
         private const val MOUNT_POLL_INTERVAL_MS = 500L
         private const val HELPER_LIB_NAME = "liblogdaemon_helper.so"
+        private const val HELPER_DEATH_GRACE_MS = 3_000L
+        private const val WATCHDOG_INTERVAL_MS = 30_000L
     }
 }

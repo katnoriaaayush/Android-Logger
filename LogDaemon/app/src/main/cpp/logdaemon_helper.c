@@ -40,6 +40,7 @@
 #define PID_RESCAN_INTERVAL_SEC 2
 #define USB_CHECK_INTERVAL_SEC 5
 #define USB_MISSING_THRESHOLD 3  // ignore transient unmounts (profile switch)
+#define USB_REMOUNT_TIMEOUT_SEC 10 // wait this long for USB to remount before giving up
 
 typedef struct {
     char name[128];
@@ -172,6 +173,22 @@ static int open_writers(void) {
 
         fprintf(pkg->tsv, "timestamp\tpid\ttid\tlevel\ttag\tmessage\n");
         fflush(pkg->tsv);
+    }
+    return 0;
+}
+
+static int reopen_writers(void) {
+    for (int i = 0; i < g_state.package_count; i++) {
+        Package *pkg = &g_state.packages[i];
+        char path[1200];
+
+        snprintf(path, sizeof(path), "%s/%s.log", g_state.session_dir, pkg->name);
+        pkg->raw = fopen(path, "a");
+        if (!pkg->raw) { LOGE("Reopen %s: %s", path, strerror(errno)); return -1; }
+
+        snprintf(path, sizeof(path), "%s/%s.log.tsv", g_state.session_dir, pkg->name);
+        pkg->tsv = fopen(path, "a");
+        if (!pkg->tsv) { LOGE("Reopen %s: %s", path, strerror(errno)); fclose(pkg->raw); pkg->raw = NULL; return -1; }
     }
     return 0;
 }
@@ -444,9 +461,35 @@ int main(int argc, char **argv) {
             int idx = pid_to_package(e.pid);
             if (idx >= 0) {
                 if (write_entry(idx, &e, line) < 0) {
-                    LOGE("Write failed, USB pulled?");
-                    g_running = 0;
-                    break;
+                    LOGI("Write failed — USB remounting? Waiting up to %ds...",
+                         USB_REMOUNT_TIMEOUT_SEC);
+                    close_writers();
+                    int recovered = 0;
+                    for (int r = 0; r < USB_REMOUNT_TIMEOUT_SEC && g_running; r++) {
+                        sleep(1);
+                        if (usb_present() && reopen_writers() == 0) {
+                            time_t gap_t = time(NULL);
+                            struct tm gap_tm;
+                            localtime_r(&gap_t, &gap_tm);
+                            char gap_ts[32];
+                            strftime(gap_ts, sizeof(gap_ts), "%Y-%m-%d %H:%M:%S", &gap_tm);
+                            for (int j = 0; j < g_state.package_count; j++) {
+                                if (g_state.packages[j].raw) {
+                                    fprintf(g_state.packages[j].raw,
+                                            "--- USB remount gap ended at %s ---\n", gap_ts);
+                                    fflush(g_state.packages[j].raw);
+                                }
+                            }
+                            LOGI("USB remounted after %ds, session continuing", r + 1);
+                            recovered = 1;
+                            break;
+                        }
+                    }
+                    if (!recovered) {
+                        LOGE("USB not recovered after %ds, exiting", USB_REMOUNT_TIMEOUT_SEC);
+                        g_running = 0;
+                        break;
+                    }
                 }
                 lines_matched++;
             }
