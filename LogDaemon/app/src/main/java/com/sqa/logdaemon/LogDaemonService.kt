@@ -40,16 +40,31 @@ class LogDaemonService : Service() {
             } ?: false
     }
 
+    private fun findUsbHint(): String? {
+        // Scan /mnt/media_rw/ for a mounted volume that contains log.sinfo.
+        // Running in the app process gives us full StorageManager-level access;
+        // the native helper may lack permission to list /mnt/media_rw/ directly.
+        return File("/mnt/media_rw").listFiles()
+            ?.firstOrNull { dir -> dir.isDirectory && File(dir, "log.sinfo").canRead() }
+            ?.absolutePath
+    }
+
     private fun launchHelper() {
         val helperFile = File(applicationInfo.nativeLibraryDir, HELPER_LIB_NAME)
         if (!helperFile.exists() || !helperFile.canExecute()) {
             Log.e(TAG, "Helper not found or not executable: ${helperFile.absolutePath}")
             return
         }
+        val cmd = mutableListOf(helperFile.absolutePath)
+        val usbHint = findUsbHint()
+        if (usbHint != null) {
+            cmd.add(usbHint)
+            Log.i(TAG, "Passing USB hint to helper: $usbHint")
+        } else {
+            Log.i(TAG, "No USB found at launch; helper will scan autonomously")
+        }
         try {
-            ProcessBuilder(helperFile.absolutePath)
-                .redirectErrorStream(true)
-                .start()
+            ProcessBuilder(cmd).redirectErrorStream(true).start()
             Log.i(TAG, "Helper launched from ${helperFile.absolutePath}")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to launch helper", e)

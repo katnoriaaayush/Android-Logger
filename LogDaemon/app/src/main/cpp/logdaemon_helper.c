@@ -130,7 +130,10 @@ static void daemonize(void) {
 
 static int find_usb(void) {
     DIR *d = opendir("/mnt/media_rw");
-    if (!d) return 0;
+    if (!d) {
+        LOGE("opendir /mnt/media_rw failed: %s", strerror(errno));
+        return 0;
+    }
 
     int found = 0;
     struct dirent *e;
@@ -594,11 +597,26 @@ static void run_session(void) {
 
 // ── main ─────────────────────────────────────────────────────────────────────
 
-int main(void) {
+int main(int argc, char **argv) {
     // Pre-daemonize instance check
     if (another_instance_running()) {
         LOGI("Another helper instance already running, exiting");
         return 0;
+    }
+
+    // Accept optional argv[1] as USB root hint from the launcher (LogDaemonService
+    // passes it when it can discover the USB path via Android StorageManager APIs).
+    // The hint is validated before use; the helper falls back to find_usb() if
+    // the hint is absent or the path no longer has log.sinfo.
+    if (argc >= 2 && argv[1] && argv[1][0] != '\0') {
+        char cfg_hint[768];
+        snprintf(cfg_hint, sizeof(cfg_hint), "%s/log.sinfo", argv[1]);
+        if (access(cfg_hint, R_OK) == 0) {
+            strncpy(g_state.usb_root, argv[1], sizeof(g_state.usb_root) - 1);
+            LOGI("USB hint accepted from launcher: %s", g_state.usb_root);
+        } else {
+            LOGI("USB hint invalid (no log.sinfo at %s), will scan", argv[1]);
+        }
     }
 
     daemonize();
@@ -612,7 +630,8 @@ int main(void) {
     LOGI("Helper started pid=%d", getpid());
 
     while (g_running) {
-        if (!find_usb()) {
+        // Use the validated hint on the first iteration; scan on subsequent ones.
+        if (g_state.usb_root[0] == '\0' && !find_usb()) {
             LOGD("No USB with log.sinfo, retrying in %ds", USB_SCAN_INTERVAL_SEC);
             sleep(USB_SCAN_INTERVAL_SEC);
             continue;
