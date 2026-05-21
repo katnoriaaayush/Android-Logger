@@ -5,11 +5,6 @@ import android.content.Context
 import android.content.Intent
 import android.util.Log
 
-/**
- * Starts the LogDaemonService when the device finishes booting.
- * Handles both BOOT_COMPLETED (normal boot) and LOCKED_BOOT_COMPLETED
- * (Direct Boot, before user unlock) so the daemon is up ASAP.
- */
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         Log.i(TAG, "BootReceiver got action=${intent.action}")
@@ -17,12 +12,7 @@ class BootReceiver : BroadcastReceiver() {
             Intent.ACTION_BOOT_COMPLETED,
             Intent.ACTION_LOCKED_BOOT_COMPLETED,
             Intent.ACTION_MY_PACKAGE_REPLACED -> {
-                if (LogDaemonApp.serviceRunning) {
-                    Log.i(TAG, "Service already running — skipping start")
-                    return
-                }
-                val serviceIntent = Intent(context, LogDaemonService::class.java)
-                context.startService(serviceIntent)
+                context.startService(Intent(context, LogDaemonService::class.java))
                 Log.i(TAG, "LogDaemonService start requested")
             }
         }

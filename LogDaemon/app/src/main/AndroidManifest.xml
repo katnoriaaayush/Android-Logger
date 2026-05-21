@@ -29,9 +29,6 @@
         tools:ignore="ProtectedPermissions" />
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
         tools:ignore="ScopedStorage" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
-
     <application
         android:name=".LogDaemonApp"
         android:allowBackup="false"
@@ -53,27 +50,10 @@
             </intent-filter>
         </receiver>
 
-        <!-- USB attach/detach receiver -->
-        <receiver
-            android:name=".usb.UsbStateReceiver"
-            android:enabled="true"
-            android:exported="true"
-            android:singleUser="true">
-            <intent-filter>
-                <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
-                <action android:name="android.hardware.usb.action.USB_DEVICE_DETACHED" />
-                <action android:name="android.intent.action.MEDIA_MOUNTED" />
-                <action android:name="android.intent.action.MEDIA_UNMOUNTED" />
-                <action android:name="android.intent.action.MEDIA_EJECT" />
-                <action android:name="android.intent.action.MEDIA_REMOVED" />
-                <data android:scheme="file" />
-            </intent-filter>
-        </receiver>
-
         <!--
-            The daemon service.
-            stopWithTask=false ensures it isn't killed if a (non-existent) UI task closes.
-            No <intent-filter> for LAUNCHER => no launcher icon, no notification.
+            One-shot launcher service: checks if helper is alive, launches it if not,
+            then calls stopSelf(). The native helper outlives this service.
+            No <intent-filter> for LAUNCHER => no launcher icon.
         -->
         <service
             android:name=".LogDaemonService"
