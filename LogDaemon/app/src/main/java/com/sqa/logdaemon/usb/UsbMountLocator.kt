@@ -56,7 +56,14 @@ object UsbMountLocator {
                 if (volume.state != Environment.MEDIA_MOUNTED) continue
                 val dir = volume.directory
                 if (dir != null && dir.exists()) {
-                    result.add(dir)
+                    // Prefer /mnt/media_rw/<uuid>/ over /storage/<uuid>/.
+                    // /storage/ is a per-user FUSE overlay that is torn down and
+                    // recreated on profile switches, causing write failures in the
+                    // native helper. /mnt/media_rw/ is the underlying raw FAT mount
+                    // managed by vold and remains accessible regardless of which user
+                    // profile is active.
+                    val rawDir = File("/mnt/media_rw", dir.name)
+                    result.add(if (rawDir.exists() && rawDir.canRead()) rawDir else dir)
                 }
             }
         } catch (e: Exception) {
