@@ -9,28 +9,53 @@ import java.io.File
 /**
  * One-shot launcher for the native helper daemon.
  *
- * Checks whether liblogdaemon_helper.so is already running by scanning
- * /proc/*/cmdline. If not, launches it. The helper double-forks and setsid()s
- * to detach from this process group, so it outlives this service and any
- * subsequent profile-switch kills. stopSelf() is called immediately after
- * launch — this service has nothing further to do.
+ * At boot: checks /proc/*/cmdline for a running helper, launches it if absent,
+ * then calls stopSelf(). The helper double-forks and setsid()s — it outlives
+ * this service and survives profile-switch kills.
+ *
+ * On USB hot-plug (ACTION_MEDIA_MOUNTED from UsbStateReceiver): writes the USB
+ * path to a hint file in app storage. The running helper's find_usb() polls
+ * this file as a fallback when it cannot list /mnt/media_rw/ directly. If the
+ * helper is not alive, it is (re)launched with the path as argv[1].
  */
 class LogDaemonService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        Log.i(TAG, "LogDaemonService: checking helper")
+        Log.i(TAG, "LogDaemonService created")
+        val usbHint = findUsbHint()
+        if (usbHint != null) writeHintFile(usbHint)
+
         if (isHelperAlive()) {
-            Log.i(TAG, "Helper already running, nothing to do")
+            Log.i(TAG, "Helper already running")
         } else {
-            launchHelper()
+            launchHelper(usbHint)
         }
         stopSelf()
     }
 
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == Intent.ACTION_MEDIA_MOUNTED) {
+            val usbPath = findUsbHint()
+            if (usbPath != null) {
+                Log.i(TAG, "USB mounted: $usbPath — updating hint file")
+                writeHintFile(usbPath)
+                if (!isHelperAlive()) {
+                    Log.i(TAG, "Helper not running, launching now")
+                    launchHelper(usbPath)
+                }
+                // If helper IS alive it will discover the new path via the hint
+                // file on its next find_usb() poll (within USB_SCAN_INTERVAL_SEC).
+            } else {
+                Log.w(TAG, "MEDIA_MOUNTED but no USB with log.sinfo found")
+            }
+        }
+        stopSelf()
+        return START_NOT_STICKY
+    }
+
     private fun isHelperAlive(): Boolean {
-        val procDir = File("/proc")
-        return procDir.listFiles { f -> f.isDirectory && f.name.toIntOrNull() != null }
+        return File("/proc").listFiles { f -> f.isDirectory && f.name.toIntOrNull() != null }
             ?.any { dir ->
                 try {
                     File(dir, "cmdline").readBytes()
@@ -41,31 +66,38 @@ class LogDaemonService : Service() {
     }
 
     private fun findUsbHint(): String? {
-        // Scan /mnt/media_rw/ for a mounted volume that contains log.sinfo.
-        // Running in the app process gives us full StorageManager-level access;
-        // the native helper may lack permission to list /mnt/media_rw/ directly.
         return File("/mnt/media_rw").listFiles()
             ?.firstOrNull { dir -> dir.isDirectory && File(dir, "log.sinfo").canRead() }
             ?.absolutePath
     }
 
-    private fun launchHelper() {
+    private fun writeHintFile(usbPath: String) {
+        try {
+            hintFile().writeText(usbPath)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to write hint file", e)
+        }
+    }
+
+    private fun hintFile(): File = File(filesDir, HINT_FILENAME)
+
+    private fun launchHelper(usbHint: String?) {
         val helperFile = File(applicationInfo.nativeLibraryDir, HELPER_LIB_NAME)
         if (!helperFile.exists() || !helperFile.canExecute()) {
             Log.e(TAG, "Helper not found or not executable: ${helperFile.absolutePath}")
             return
         }
         val cmd = mutableListOf(helperFile.absolutePath)
-        val usbHint = findUsbHint()
         if (usbHint != null) {
             cmd.add(usbHint)
             Log.i(TAG, "Passing USB hint to helper: $usbHint")
-        } else {
-            Log.i(TAG, "No USB found at launch; helper will scan autonomously")
         }
         try {
-            ProcessBuilder(cmd).redirectErrorStream(true).start()
-            Log.i(TAG, "Helper launched from ${helperFile.absolutePath}")
+            ProcessBuilder(cmd)
+                .apply { environment()[ENV_HINT_FILE] = hintFile().absolutePath }
+                .redirectErrorStream(true)
+                .start()
+            Log.i(TAG, "Helper launched")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to launch helper", e)
         }
@@ -76,5 +108,7 @@ class LogDaemonService : Service() {
     companion object {
         private const val TAG             = "LogDaemon.Service"
         private const val HELPER_LIB_NAME = "liblogdaemon_helper.so"
+        private const val HINT_FILENAME   = "usb_hint"
+        const val         ENV_HINT_FILE   = "LOGDAEMON_HINT_FILE"
     }
 }

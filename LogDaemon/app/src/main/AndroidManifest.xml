@@ -50,6 +50,18 @@
             </intent-filter>
         </receiver>
 
+        <!-- USB mount receiver: updates hint file and relaunches helper if needed -->
+        <receiver
+            android:name=".usb.UsbStateReceiver"
+            android:enabled="true"
+            android:exported="true"
+            android:singleUser="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MEDIA_MOUNTED" />
+                <data android:scheme="file" />
+            </intent-filter>
+        </receiver>
+
         <!--
             One-shot launcher service: checks if helper is alive, launches it if not,
             then calls stopSelf(). The native helper outlives this service.

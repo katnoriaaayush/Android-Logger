@@ -65,8 +65,9 @@ typedef struct {
     int     logcat_fd;
 } State;
 
-static State           g_state  = {0};
-static volatile int    g_running = 1;
+static State           g_state     = {0};
+static volatile int    g_running   = 1;
+static char            g_hint_file[512] = "";
 
 static void sigterm_handler(int sig) { (void)sig; g_running = 0; }
 
@@ -129,26 +130,49 @@ static void daemonize(void) {
 // ── USB discovery ─────────────────────────────────────────────────────────────
 
 static int find_usb(void) {
+    int found = 0;
+
+    // Primary: scan /mnt/media_rw/ directly
     DIR *d = opendir("/mnt/media_rw");
     if (!d) {
-        LOGE("opendir /mnt/media_rw failed: %s", strerror(errno));
-        return 0;
+        LOGE("opendir /mnt/media_rw failed: %s — will rely on hint file", strerror(errno));
+    } else {
+        struct dirent *e;
+        while ((e = readdir(d))) {
+            if (e->d_name[0] == '.') continue;
+            char usb_path[512], cfg_path[768];
+            snprintf(usb_path, sizeof(usb_path), "/mnt/media_rw/%s", e->d_name);
+            snprintf(cfg_path, sizeof(cfg_path), "%s/log.sinfo", usb_path);
+            if (access(cfg_path, R_OK) == 0) {
+                strncpy(g_state.usb_root, usb_path, sizeof(g_state.usb_root) - 1);
+                found = 1;
+                break;
+            }
+        }
+        closedir(d);
     }
 
-    int found = 0;
-    struct dirent *e;
-    while ((e = readdir(d))) {
-        if (e->d_name[0] == '.') continue;
-        char usb_path[512], cfg_path[768];
-        snprintf(usb_path, sizeof(usb_path), "/mnt/media_rw/%s", e->d_name);
-        snprintf(cfg_path, sizeof(cfg_path), "%s/log.sinfo", usb_path);
-        if (access(cfg_path, R_OK) == 0) {
-            strncpy(g_state.usb_root, usb_path, sizeof(g_state.usb_root) - 1);
-            found = 1;
-            break;
+    // Fallback: hint file written by LogDaemonService on USB mount events.
+    // This handles the case where SELinux blocks opendir("/mnt/media_rw").
+    if (!found && g_hint_file[0]) {
+        FILE *hf = fopen(g_hint_file, "r");
+        if (hf) {
+            char hint[512] = {0};
+            if (fgets(hint, sizeof(hint), hf)) {
+                char *nl = strchr(hint, '\n');
+                if (nl) *nl = 0;
+                char cfg[768];
+                snprintf(cfg, sizeof(cfg), "%s/log.sinfo", hint);
+                if (hint[0] && access(cfg, R_OK) == 0) {
+                    strncpy(g_state.usb_root, hint, sizeof(g_state.usb_root) - 1);
+                    found = 1;
+                    LOGI("USB found via hint file: %s", g_state.usb_root);
+                }
+            }
+            fclose(hf);
         }
     }
-    closedir(d);
+
     return found;
 }
 
@@ -602,6 +626,15 @@ int main(int argc, char **argv) {
     if (another_instance_running()) {
         LOGI("Another helper instance already running, exiting");
         return 0;
+    }
+
+    // Hint file path comes from LOGDAEMON_HINT_FILE env var set by LogDaemonService.
+    // The service updates this file on every USB mount event, so the running helper
+    // can discover hot-plugged USB drives even if opendir("/mnt/media_rw") is blocked.
+    const char *env_hint = getenv("LOGDAEMON_HINT_FILE");
+    if (env_hint && env_hint[0]) {
+        strncpy(g_hint_file, env_hint, sizeof(g_hint_file) - 1);
+        LOGI("Hint file path: %s", g_hint_file);
     }
 
     // Accept optional argv[1] as USB root hint from the launcher (LogDaemonService
