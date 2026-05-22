@@ -36,7 +36,10 @@ class LogDaemonService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == Intent.ACTION_MEDIA_MOUNTED) {
-            val usbPath = findUsbHint()
+            // Try the mounted path from the intent URI first (ACTION_MEDIA_MOUNTED
+            // data is file:///storage/<uuid>; translate to /mnt/media_rw/<uuid>).
+            // Fall back to a full scan if the URI path isn't usable yet.
+            val usbPath = usbPathFromIntent(intent) ?: findUsbHint()
             if (usbPath != null) {
                 Log.i(TAG, "USB mounted: $usbPath — updating hint file")
                 writeHintFile(usbPath)
@@ -44,14 +47,26 @@ class LogDaemonService : Service() {
                     Log.i(TAG, "Helper not running, launching now")
                     launchHelper(usbPath)
                 }
-                // If helper IS alive it will discover the new path via the hint
-                // file on its next find_usb() poll (within USB_SCAN_INTERVAL_SEC).
+                // If helper IS alive it discovers the new path via the hint file
+                // on its next find_usb() poll (within USB_SCAN_INTERVAL_SEC).
             } else {
-                Log.w(TAG, "MEDIA_MOUNTED but no USB with log.sinfo found")
+                Log.w(TAG, "MEDIA_MOUNTED but no USB with log.sinfo found (data=${intent.data})")
             }
         }
         stopSelf()
         return START_NOT_STICKY
+    }
+
+    /**
+     * ACTION_MEDIA_MOUNTED carries a file:///storage/<uuid> URI.
+     * Translate the UUID segment to /mnt/media_rw/<uuid> and verify log.sinfo.
+     */
+    private fun usbPathFromIntent(intent: Intent): String? {
+        val storagePath = intent.data?.path ?: return null          // /storage/3C21-40FC
+        val uuid = File(storagePath).name.takeIf { it.isNotEmpty() } ?: return null
+        val mediaRwPath = File("/mnt/media_rw", uuid)
+        return if (File(mediaRwPath, "log.sinfo").canRead()) mediaRwPath.absolutePath
+               else null
     }
 
     private fun isHelperAlive(): Boolean {

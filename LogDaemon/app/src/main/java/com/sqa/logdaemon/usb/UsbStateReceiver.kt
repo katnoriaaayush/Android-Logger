@@ -16,7 +16,10 @@ class UsbStateReceiver : BroadcastReceiver() {
         if (intent.action != Intent.ACTION_MEDIA_MOUNTED) return
         Log.i(TAG, "USB mounted: ${intent.dataString}")
         context.startService(
-            Intent(context, LogDaemonService::class.java).apply { action = intent.action }
+            Intent(context, LogDaemonService::class.java).apply {
+                action = intent.action
+                data = intent.data  // file:///storage/<uuid> — needed to extract volume path
+            }
         )
     }
 
