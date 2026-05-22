@@ -64,7 +64,11 @@ class LogDaemonService : Service() {
     private fun usbPathFromIntent(intent: Intent): String? {
         // ACTION_MEDIA_MOUNTED data is file:///storage/<uuid>
         val uuid = intent.data?.path?.let { File(it).name }
-            ?.takeIf { it.isNotEmpty() } ?: return null
+            ?.takeIf { it.isNotEmpty() } ?: run {
+            Log.w(TAG, "MEDIA_MOUNTED intent has no data URI")
+            return null
+        }
+        Log.i(TAG, "MEDIA_MOUNTED intent uuid=$uuid, resolving write path...")
         return resolveWritablePath(uuid)
     }
 
@@ -82,13 +86,18 @@ class LogDaemonService : Service() {
     private fun findUsbHint(): String? {
         // /mnt/media_rw/ listing is blocked by SELinux. Scan /storage/ instead
         // (always accessible), then resolve the best writable path for the UUID.
-        return File("/storage").listFiles()
-            ?.firstOrNull { dir ->
-                dir.isDirectory &&
-                dir.name != "self" && dir.name != "emulated" &&
-                File(dir, "log.sinfo").canRead()
-            }
-            ?.let { resolveWritablePath(it.name) }
+        val volumes = File("/storage").listFiles()
+            ?.filter { it.isDirectory && it.name != "self" && it.name != "emulated" }
+            ?: emptyList()
+        Log.d(TAG, "Scanning /storage/ — ${volumes.size} candidate volume(s): " +
+                volumes.joinToString { it.name })
+        val match = volumes.firstOrNull { File(it, "log.sinfo").canRead() }
+        if (match == null) {
+            Log.i(TAG, "No volume with log.sinfo found under /storage/")
+            return null
+        }
+        Log.i(TAG, "log.sinfo found on volume ${match.name}, resolving write path...")
+        return resolveWritablePath(match.name)
     }
 
     /**
@@ -97,9 +106,17 @@ class LogDaemonService : Service() {
      */
     private fun resolveWritablePath(uuid: String): String? {
         val mediaRw = File("/mnt/media_rw", uuid)
-        if (File(mediaRw, "log.sinfo").canRead()) return mediaRw.absolutePath
+        if (File(mediaRw, "log.sinfo").canRead()) {
+            Log.i(TAG, "Write path: ${mediaRw.absolutePath} [raw vold mount]")
+            return mediaRw.absolutePath
+        }
+        Log.i(TAG, "/mnt/media_rw/$uuid not accessible, trying /storage/$uuid")
         val storage = File("/storage", uuid)
-        if (File(storage, "log.sinfo").canRead()) return storage.absolutePath
+        if (File(storage, "log.sinfo").canRead()) {
+            Log.i(TAG, "Write path: ${storage.absolutePath} [FUSE overlay — profile-switch may interrupt writes]")
+            return storage.absolutePath
+        }
+        Log.e(TAG, "Neither /mnt/media_rw/$uuid nor /storage/$uuid accessible")
         return null
     }
 

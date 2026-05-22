@@ -138,16 +138,21 @@ static int resolve_usb_path(const char *uuid) {
     snprintf(media_rw_cfg, sizeof(media_rw_cfg), "%s/log.sinfo", media_rw);
     if (access(media_rw_cfg, R_OK) == 0) {
         strncpy(g_state.usb_root, media_rw, sizeof(g_state.usb_root) - 1);
+        LOGI("USB path resolved: %s [raw vold mount]", g_state.usb_root);
         return 1;
     }
+    LOGI("  /mnt/media_rw/%s not accessible (errno=%d: %s), trying /storage/",
+         uuid, errno, strerror(errno));
     char storage[512], storage_cfg[768];
     snprintf(storage, sizeof(storage), "/storage/%s", uuid);
     snprintf(storage_cfg, sizeof(storage_cfg), "%s/log.sinfo", storage);
     if (access(storage_cfg, R_OK) == 0) {
         strncpy(g_state.usb_root, storage, sizeof(g_state.usb_root) - 1);
-        LOGI("Using /storage/ path (/mnt/media_rw not accessible)");
+        LOGI("USB path resolved: %s [FUSE overlay — profile-switch may interrupt writes]",
+             g_state.usb_root);
         return 1;
     }
+    LOGE("  /storage/%s not accessible either (errno=%d: %s)", uuid, errno, strerror(errno));
     return 0;
 }
 
@@ -158,7 +163,7 @@ static int find_usb(void) {
     // blocked by SELinux. Skip system pseudo-entries (self, emulated).
     DIR *d = opendir("/storage");
     if (!d) {
-        LOGE("opendir /storage failed: %s", strerror(errno));
+        LOGE("opendir /storage failed (errno=%d: %s)", errno, strerror(errno));
     } else {
         struct dirent *e;
         while ((e = readdir(d)) && !found) {
@@ -167,7 +172,10 @@ static int find_usb(void) {
             if (strcmp(e->d_name, "emulated") == 0) continue;
             char cfg[768];
             snprintf(cfg, sizeof(cfg), "/storage/%s/log.sinfo", e->d_name);
+            LOGD("Checking volume: /storage/%s  log.sinfo=%s",
+                 e->d_name, access(cfg, R_OK) == 0 ? "found" : "absent");
             if (access(cfg, R_OK) == 0) {
+                LOGI("log.sinfo found on volume %s, resolving write path...", e->d_name);
                 found = resolve_usb_path(e->d_name);
             }
         }
@@ -176,6 +184,7 @@ static int find_usb(void) {
 
     // Fallback: hint file written by LogDaemonService on USB mount events.
     if (!found && g_hint_file[0]) {
+        LOGD("Scan found nothing, checking hint file: %s", g_hint_file);
         FILE *hf = fopen(g_hint_file, "r");
         if (hf) {
             char hint[512] = {0};
@@ -187,10 +196,14 @@ static int find_usb(void) {
                 if (hint[0] && access(cfg, R_OK) == 0) {
                     strncpy(g_state.usb_root, hint, sizeof(g_state.usb_root) - 1);
                     found = 1;
-                    LOGI("USB found via hint file: %s", g_state.usb_root);
+                    LOGI("USB path resolved: %s [from hint file]", g_state.usb_root);
+                } else {
+                    LOGD("Hint file contained '%s' but log.sinfo not accessible there", hint);
                 }
             }
             fclose(hf);
+        } else {
+            LOGD("Hint file not found or not readable: %s", g_hint_file);
         }
     }
 
