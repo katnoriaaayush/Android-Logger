@@ -62,11 +62,10 @@ class LogDaemonService : Service() {
      * Translate the UUID segment to /mnt/media_rw/<uuid> and verify log.sinfo.
      */
     private fun usbPathFromIntent(intent: Intent): String? {
-        val storagePath = intent.data?.path ?: return null          // /storage/3C21-40FC
-        val uuid = File(storagePath).name.takeIf { it.isNotEmpty() } ?: return null
-        val mediaRwPath = File("/mnt/media_rw", uuid)
-        return if (File(mediaRwPath, "log.sinfo").canRead()) mediaRwPath.absolutePath
-               else null
+        // ACTION_MEDIA_MOUNTED data is file:///storage/<uuid>
+        val uuid = intent.data?.path?.let { File(it).name }
+            ?.takeIf { it.isNotEmpty() } ?: return null
+        return resolveWritablePath(uuid)
     }
 
     private fun isHelperAlive(): Boolean {
@@ -81,9 +80,27 @@ class LogDaemonService : Service() {
     }
 
     private fun findUsbHint(): String? {
-        return File("/mnt/media_rw").listFiles()
-            ?.firstOrNull { dir -> dir.isDirectory && File(dir, "log.sinfo").canRead() }
-            ?.absolutePath
+        // /mnt/media_rw/ listing is blocked by SELinux. Scan /storage/ instead
+        // (always accessible), then resolve the best writable path for the UUID.
+        return File("/storage").listFiles()
+            ?.firstOrNull { dir ->
+                dir.isDirectory &&
+                dir.name != "self" && dir.name != "emulated" &&
+                File(dir, "log.sinfo").canRead()
+            }
+            ?.let { resolveWritablePath(it.name) }
+    }
+
+    /**
+     * Prefer /mnt/media_rw/<uuid> (raw vold FAT mount; survives profile-switch
+     * FUSE teardowns). Fall back to /storage/<uuid> if /mnt/media_rw is blocked.
+     */
+    private fun resolveWritablePath(uuid: String): String? {
+        val mediaRw = File("/mnt/media_rw", uuid)
+        if (File(mediaRw, "log.sinfo").canRead()) return mediaRw.absolutePath
+        val storage = File("/storage", uuid)
+        if (File(storage, "log.sinfo").canRead()) return storage.absolutePath
+        return null
     }
 
     private fun writeHintFile(usbPath: String) {

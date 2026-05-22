@@ -129,31 +129,52 @@ static void daemonize(void) {
 
 // ── USB discovery ─────────────────────────────────────────────────────────────
 
+// Resolve the best writable path for a given volume UUID.
+// Prefers /mnt/media_rw/<uuid>/ (raw vold FAT mount; survives profile-switch
+// FUSE teardowns). Falls back to /storage/<uuid>/ if /mnt/media_rw is blocked.
+static int resolve_usb_path(const char *uuid) {
+    char media_rw[512], media_rw_cfg[768];
+    snprintf(media_rw, sizeof(media_rw), "/mnt/media_rw/%s", uuid);
+    snprintf(media_rw_cfg, sizeof(media_rw_cfg), "%s/log.sinfo", media_rw);
+    if (access(media_rw_cfg, R_OK) == 0) {
+        strncpy(g_state.usb_root, media_rw, sizeof(g_state.usb_root) - 1);
+        return 1;
+    }
+    char storage[512], storage_cfg[768];
+    snprintf(storage, sizeof(storage), "/storage/%s", uuid);
+    snprintf(storage_cfg, sizeof(storage_cfg), "%s/log.sinfo", storage);
+    if (access(storage_cfg, R_OK) == 0) {
+        strncpy(g_state.usb_root, storage, sizeof(g_state.usb_root) - 1);
+        LOGI("Using /storage/ path (/mnt/media_rw not accessible)");
+        return 1;
+    }
+    return 0;
+}
+
 static int find_usb(void) {
     int found = 0;
 
-    // Primary: scan /mnt/media_rw/ directly
-    DIR *d = opendir("/mnt/media_rw");
+    // Scan /storage/ — always accessible, even when /mnt/media_rw/ listing is
+    // blocked by SELinux. Skip system pseudo-entries (self, emulated).
+    DIR *d = opendir("/storage");
     if (!d) {
-        LOGE("opendir /mnt/media_rw failed: %s — will rely on hint file", strerror(errno));
+        LOGE("opendir /storage failed: %s", strerror(errno));
     } else {
         struct dirent *e;
-        while ((e = readdir(d))) {
+        while ((e = readdir(d)) && !found) {
             if (e->d_name[0] == '.') continue;
-            char usb_path[512], cfg_path[768];
-            snprintf(usb_path, sizeof(usb_path), "/mnt/media_rw/%s", e->d_name);
-            snprintf(cfg_path, sizeof(cfg_path), "%s/log.sinfo", usb_path);
-            if (access(cfg_path, R_OK) == 0) {
-                strncpy(g_state.usb_root, usb_path, sizeof(g_state.usb_root) - 1);
-                found = 1;
-                break;
+            if (strcmp(e->d_name, "self")     == 0) continue;
+            if (strcmp(e->d_name, "emulated") == 0) continue;
+            char cfg[768];
+            snprintf(cfg, sizeof(cfg), "/storage/%s/log.sinfo", e->d_name);
+            if (access(cfg, R_OK) == 0) {
+                found = resolve_usb_path(e->d_name);
             }
         }
         closedir(d);
     }
 
     // Fallback: hint file written by LogDaemonService on USB mount events.
-    // This handles the case where SELinux blocks opendir("/mnt/media_rw").
     if (!found && g_hint_file[0]) {
         FILE *hf = fopen(g_hint_file, "r");
         if (hf) {
@@ -576,8 +597,7 @@ static void run_session(void) {
                     if (!recovered) {
                         LOGE("USB not recovered after %ds, ending session",
                              USB_REMOUNT_TIMEOUT_SEC);
-                        g_running = 0;  // SIGTERM-equivalent; outer loop will also exit
-                        break;
+                        break;  // end this session; outer loop resets and rescans
                     }
                 }
                 lines_matched++;
