@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Daily Protein Tracker</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        :root {
+            --bg: #0d1117;
+            --surface: #161b22;
+            --border: #30363d;
+            --accent: #58a6ff;
+            --green: #3fb950;
+            --yellow: #d29922;
+            --red: #da3633;
+            --text: #c9d1d9;
+            --text-bright: #e6edf3;
+            --muted: #8b949e;
+            --radius: 14px;
+        }
+        body {
+            background: var(--bg);
+            color: var(--text);
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+            min-height: 100vh;
+            padding: 24px 16px 80px;
+            max-width: 500px;
+            margin: 0 auto;
+        }
+
+        /* ── HEADER ── */
+        header { text-align: center; margin-bottom: 36px; }
+        header h1 { font-size: 1.7rem; font-weight: 800; color: var(--text-bright); letter-spacing: -0.5px; }
+        header .date { color: var(--muted); font-size: 0.9rem; margin-top: 5px; }
+
+        /* ── RING PROGRESS ── */
+        .ring-wrap { display: flex; flex-direction: column; align-items: center; margin-bottom: 36px; }
+        .ring { position: relative; width: 180px; height: 180px; }
+        .ring svg { transform: rotate(-90deg); width: 180px; height: 180px; }
+        .ring-bg   { fill: none; stroke: var(--surface); stroke-width: 14; }
+        .ring-fill { fill: none; stroke-width: 14; stroke-linecap: round;
+                     transition: stroke-dashoffset 0.6s cubic-bezier(.4,0,.2,1), stroke 0.4s; }
+        .ring-center {
+            position: absolute; top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center; pointer-events: none;
+        }
+        .ring-center .grams { font-size: 2.6rem; font-weight: 800; color: var(--text-bright); line-height: 1; }
+        .ring-center .unit  { font-size: 0.85rem; color: var(--muted); margin-top: 2px; }
+        .ring-caption { margin-top: 10px; font-size: 0.9rem; color: var(--muted); transition: color 0.3s; }
+
+        /* ── SECTION TITLES ── */
+        .section-title {
+            font-size: 0.75rem; font-weight: 700;
+            text-transform: uppercase; letter-spacing: 0.1em;
+            color: var(--muted); margin-bottom: 12px;
+        }
+
+        /* ── FOOD CARDS ── */
+        .food-list { display: flex; flex-direction: column; gap: 10px; margin-bottom: 28px; }
+        .food-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 16px;
+            display: flex; align-items: center; gap: 14px;
+            cursor: pointer; user-select: none;
+            transition: background 0.15s, border-color 0.2s, transform 0.1s;
+        }
+        .food-card:hover  { background: #1c2333; }
+        .food-card:active { transform: scale(0.98); }
+        .food-card.done {
+            border-color: var(--green);
+            background: rgba(63,185,80,0.07);
+        }
+        .food-card .icon  { font-size: 2.1rem; width: 46px; text-align: center; flex-shrink: 0; }
+        .food-card .info  { flex: 1; min-width: 0; }
+        .food-card .name  { font-weight: 700; font-size: 1rem; color: var(--text-bright); }
+        .food-card .sub   { font-size: 0.78rem; color: var(--muted); margin-top: 2px; }
+        .food-card .grams-badge {
+            font-size: 0.9rem; font-weight: 700;
+            color: var(--accent); flex-shrink: 0;
+        }
+        .food-card.done .grams-badge { color: var(--green); }
+        .food-card .check-circle {
+            width: 24px; height: 24px;
+            border: 2px solid var(--border);
+            border-radius: 50%; flex-shrink: 0;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 0.75rem; font-weight: 700; color: white;
+            transition: all 0.2s;
+        }
+        .food-card.done .check-circle { background: var(--green); border-color: var(--green); }
+
+        /* ── PROGRESS BAR (per card) ── */
+        .mini-bar { height: 4px; background: var(--border); border-radius: 99px; margin-top: 6px; overflow: hidden; }
+        .mini-bar-fill { height: 100%; background: var(--accent); border-radius: 99px; transition: width 0.4s; }
+        .food-card.done .mini-bar-fill { background: var(--green); width: 100% !important; }
+
+        /* ── ADD CUSTOM ── */
+        .add-section { margin-bottom: 28px; }
+        .add-form { display: flex; gap: 8px; }
+        .input {
+            flex: 1;
+            background: var(--surface); border: 1px solid var(--border);
+            border-radius: 10px; padding: 10px 12px;
+            color: var(--text); font-size: 0.9rem; outline: none;
+        }
+        .input:focus { border-color: var(--accent); }
+        .input::placeholder { color: var(--muted); }
+        .input-small { width: 72px; flex: none; }
+        .btn {
+            background: var(--accent); color: #0d1117;
+            border: none; border-radius: 10px;
+            padding: 10px 16px; font-weight: 700;
+            font-size: 0.9rem; cursor: pointer;
+            transition: opacity 0.2s, transform 0.1s;
+            white-space: nowrap;
+        }
+        .btn:hover  { opacity: 0.85; }
+        .btn:active { transform: scale(0.97); }
+        .btn-ghost {
+            background: transparent; color: var(--muted);
+            border: 1px solid var(--border);
+        }
+        .btn-ghost:hover { color: var(--text); border-color: var(--text); opacity: 1; }
+
+        /* ── CUSTOM ITEMS ── */
+        .custom-list { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+        .custom-item {
+            display: flex; align-items: center; gap: 10px;
+            background: var(--surface); border: 1px solid var(--border);
+            border-radius: 10px; padding: 11px 14px;
+            cursor: pointer; user-select: none;
+            transition: background 0.15s, border-color 0.2s;
+        }
+        .custom-item:hover { background: #1c2333; }
+        .custom-item.done { border-color: var(--green); background: rgba(63,185,80,0.07); }
+        .custom-item .ci-check {
+            width: 20px; height: 20px;
+            border: 2px solid var(--border); border-radius: 50%; flex-shrink: 0;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 0.65rem; font-weight: 700; color: white;
+            transition: all 0.2s;
+        }
+        .custom-item.done .ci-check { background: var(--green); border-color: var(--green); }
+        .custom-item .ci-name { flex: 1; font-size: 0.9rem; color: var(--text-bright); }
+        .custom-item .ci-g { font-size: 0.85rem; font-weight: 700; color: var(--accent); }
+        .custom-item.done .ci-g { color: var(--green); }
+        .custom-item .ci-del {
+            font-size: 1rem; color: var(--muted); cursor: pointer;
+            padding: 2px 6px; border-radius: 6px; transition: all 0.15s;
+            line-height: 1;
+        }
+        .custom-item .ci-del:hover { color: var(--red); background: rgba(218,54,51,0.12); }
+
+        /* ── HISTORY ── */
+        .history-section { margin-bottom: 28px; }
+        .history-list { display: flex; flex-direction: column; gap: 8px; }
+        .history-item {
+            background: var(--surface); border: 1px solid var(--border);
+            border-radius: 10px; padding: 12px 14px;
+            display: flex; align-items: center; gap: 12px;
+        }
+        .hi-date { font-size: 0.82rem; color: var(--muted); width: 100px; flex-shrink: 0; }
+        .hi-bar  { flex: 1; }
+        .hi-track { height: 6px; background: var(--bg); border-radius: 99px; overflow: hidden; }
+        .hi-fill  { height: 100%; border-radius: 99px; transition: width 0.5s; }
+        .hi-g { font-size: 0.85rem; font-weight: 700; width: 48px; text-align: right; flex-shrink: 0; }
+        .history-empty { color: var(--muted); font-size: 0.85rem; padding: 6px 0; }
+
+        /* ── ACTIONS ── */
+        .actions { display: flex; gap: 8px; }
+        .actions .btn { flex: 1; }
+
+        /* ── TOAST ── */
+        .toast {
+            position: fixed; bottom: 28px; left: 50%;
+            transform: translateX(-50%) translateY(8px);
+            background: var(--surface); border: 1px solid var(--green);
+            border-radius: 10px; padding: 10px 22px;
+            font-size: 0.88rem; color: var(--green);
+            opacity: 0; pointer-events: none;
+            transition: opacity 0.25s, transform 0.25s;
+            z-index: 200; white-space: nowrap;
+        }
+        .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+    </style>
+</head>
+<body>
+
+<header>
+    <h1>&#x1F4AA; Protein Tracker</h1>
+    <div class="date" id="dateLabel"></div>
+</header>
+
+<!-- Ring progress -->
+<div class="ring-wrap">
+    <div class="ring">
+        <svg viewBox="0 0 180 180">
+            <circle class="ring-bg" cx="90" cy="90" r="76"/>
+            <circle class="ring-fill" id="ringFill" cx="90" cy="90" r="76"
+                    stroke-dasharray="477.5" stroke-dashoffset="477.5"/>
+        </svg>
+        <div class="ring-center">
+            <div class="grams" id="ringGrams">0</div>
+            <div class="unit">of <span id="ringGoal">74</span>g</div>
+        </div>
+    </div>
+    <div class="ring-caption" id="ringCaption">Log your first meal to get started!</div>
+</div>
+
+<!-- Daily goal items -->
+<div class="section-title">Daily Goals</div>
+<div class="food-list" id="foodList"></div>
+
+<!-- Custom food -->
+<div class="add-section">
+    <div class="section-title">Add Custom Food</div>
+    <div class="add-form">
+        <input class="input" id="customName" placeholder="Food name" maxlength="40"/>
+        <input class="input input-small" id="customGrams" placeholder="g" type="number" min="1" max="500"/>
+        <button class="btn" onclick="addCustom()">Add</button>
+    </div>
+    <div class="custom-list" id="customList"></div>
+</div>
+
+<!-- History -->
+<div class="history-section">
+    <div class="section-title">Last 7 Days</div>
+    <div class="history-list" id="historyList"></div>
+</div>
+
+<!-- Actions -->
+<div class="actions">
+    <button class="btn btn-ghost" onclick="resetDay()">Reset Today</button>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const GOAL = 74;
+const CIRC = 2 * Math.PI * 76; // ~477.5
+
+const BASE_ITEMS = [
+    { id: 'eggs',  icon: '&#x1F95A;', name: '4 Eggs',        sub: '4 whole eggs &#x2022; ~6g each', grams: 24 },
+    { id: 'shake', icon: '&#x1F964;', name: 'Protein Shake',  sub: '1 serving scoop',               grams: 25 },
+    { id: 'milk',  icon: '&#x1F95B;', name: 'Protein Milk',   sub: '1 serving / glass',              grams: 25 },
+];
+
+const todayKey = () => new Date().toISOString().slice(0, 10);
+
+function loadState() {
+    const raw = localStorage.getItem('pt_' + todayKey());
+    return raw ? JSON.parse(raw) : { checked: {}, custom: [] };
+}
+
+function saveState(s) {
+    localStorage.setItem('pt_' + todayKey(), JSON.stringify(s));
+    pruneOld();
+}
+
+function pruneOld() {
+    const keys = Object.keys(localStorage)
+        .filter(k => k.startsWith('pt_')).sort();
+    while (keys.length > 7) localStorage.removeItem(keys.shift());
+}
+
+function calcTotal(s) {
+    let t = 0;
+    BASE_ITEMS.forEach(it => { if (s.checked[it.id]) t += it.grams; });
+    (s.custom || []).forEach(ci => { if (ci.checked) t += ci.grams; });
+    return t;
+}
+
+function progressColor(pct) {
+    if (pct >= 1)   return '#3fb950';
+    if (pct >= 0.6) return '#58a6ff';
+    return '#d29922';
+}
+
+function renderRing(total) {
+    const pct  = Math.min(total / GOAL, 1);
+    const fill = document.getElementById('ringFill');
+    fill.style.strokeDasharray  = CIRC;
+    fill.style.strokeDashoffset = CIRC * (1 - pct);
+    fill.style.stroke = progressColor(pct);
+    document.getElementById('ringGrams').textContent = total;
+    document.getElementById('ringGoal').textContent  = GOAL;
+    const cap = document.getElementById('ringCaption');
+    if (pct >= 1) {
+        cap.textContent = '&#x1F389; Daily goal reached! Great work!';
+        cap.style.color = '#3fb950';
+    } else if (total === 0) {
+        cap.textContent = 'Log your first meal to get started!';
+        cap.style.color = '';
+    } else {
+        cap.textContent = (GOAL - total) + 'g remaining to hit your ' + GOAL + 'g goal';
+        cap.style.color = '';
+    }
+}
+
+function renderFoodList(s) {
+    const el = document.getElementById('foodList');
+    el.innerHTML = '';
+    BASE_ITEMS.forEach(it => {
+        const done = !!s.checked[it.id];
+        const card = document.createElement('div');
+        card.className = 'food-card' + (done ? ' done' : '');
+        card.innerHTML =
+            '<div class="icon">' + it.icon + '</div>' +
+            '<div class="info">' +
+              '<div class="name">' + it.name + '</div>' +
+              '<div class="sub">'  + it.sub  + '</div>' +
+              '<div class="mini-bar"><div class="mini-bar-fill" style="width:' + (done ? 100 : 0) + '%"></div></div>' +
+            '</div>' +
+            '<div class="grams-badge">' + it.grams + 'g</div>' +
+            '<div class="check-circle">' + (done ? '&#x2713;' : '') + '</div>';
+        card.addEventListener('click', () => toggleBase(it.id));
+        el.appendChild(card);
+    });
+}
+
+function renderCustomList(s) {
+    const el = document.getElementById('customList');
+    el.innerHTML = '';
+    (s.custom || []).forEach((ci, idx) => {
+        const item = document.createElement('div');
+        item.className = 'custom-item' + (ci.checked ? ' done' : '');
+        item.innerHTML =
+            '<div class="ci-check">' + (ci.checked ? '&#x2713;' : '') + '</div>' +
+            '<div class="ci-name">' + escHtml(ci.name) + '</div>' +
+            '<div class="ci-g">' + ci.grams + 'g</div>' +
+            '<div class="ci-del" title="Remove">&#x2715;</div>';
+        item.querySelector('.ci-del').addEventListener('click', e => {
+            e.stopPropagation();
+            deleteCustom(idx);
+        });
+        item.addEventListener('click', e => {
+            if (!e.target.classList.contains('ci-del')) toggleCustom(idx);
+        });
+        el.appendChild(item);
+    });
+}
+
+function renderHistory() {
+    const el = document.getElementById('historyList');
+    el.innerHTML = '';
+    const days = [];
+    for (let i = 1; i <= 6; i++) {
+        const d = new Date();
+        d.setDate(d.getDate() - i);
+        days.push(d.toISOString().slice(0, 10));
+    }
+    const entries = days.filter(d => localStorage.getItem('pt_' + d));
+    if (!entries.length) {
+        el.innerHTML = '<div class="history-empty">No history yet &#x2014; check back tomorrow!</div>';
+        return;
+    }
+    entries.forEach(d => {
+        const raw = localStorage.getItem('pt_' + d);
+        if (!raw) return;
+        const g   = calcTotal(JSON.parse(raw));
+        const pct = Math.min(g / GOAL * 100, 100);
+        const col = progressColor(g / GOAL);
+        const row = document.createElement('div');
+        row.className = 'history-item';
+        row.innerHTML =
+            '<div class="hi-date">' + fmtDate(d) + '</div>' +
+            '<div class="hi-bar"><div class="hi-track"><div class="hi-fill" style="width:' + pct + '%;background:' + col + '"></div></div></div>' +
+            '<div class="hi-g" style="color:' + col + '">' + g + 'g</div>';
+        el.appendChild(row);
+    });
+}
+
+function fmtDate(iso) {
+    const d = new Date(iso + 'T12:00:00');
+    return d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+}
+
+function escHtml(s) {
+    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function render() {
+    const s = loadState();
+    renderRing(calcTotal(s));
+    renderFoodList(s);
+    renderCustomList(s);
+    renderHistory();
+}
+
+function toggleBase(id) {
+    const s = loadState();
+    s.checked[id] = !s.checked[id];
+    saveState(s);
+    showToast(s.checked[id] ? '&#x2713; Logged!' : 'Removed');
+    render();
+}
+
+function toggleCustom(idx) {
+    const s = loadState();
+    s.custom[idx].checked = !s.custom[idx].checked;
+    saveState(s);
+    render();
+}
+
+function deleteCustom(idx) {
+    const s = loadState();
+    s.custom.splice(idx, 1);
+    saveState(s);
+    render();
+}
+
+function addCustom() {
+    const nameEl  = document.getElementById('customName');
+    const gramsEl = document.getElementById('customGrams');
+    const name  = nameEl.value.trim();
+    const grams = parseInt(gramsEl.value);
+    if (!name || !grams || grams < 1) {
+        showToast('Enter a name and amount', 'warn');
+        return;
+    }
+    const s = loadState();
+    s.custom.push({ name, grams, checked: false });
+    saveState(s);
+    nameEl.value  = '';
+    gramsEl.value = '';
+    nameEl.focus();
+    render();
+    showToast('Added ' + name);
+}
+
+function resetDay() {
+    if (!confirm('Reset all entries for today?')) return;
+    const s = loadState();
+    s.checked = {};
+    (s.custom || []).forEach(ci => ci.checked = false);
+    saveState(s);
+    render();
+    showToast('Today reset');
+}
+
+let toastTimer;
+function showToast(msg, type) {
+    const el = document.getElementById('toast');
+    el.innerHTML = msg;
+    el.style.borderColor = type === 'warn' ? '#d29922' : '#3fb950';
+    el.style.color       = type === 'warn' ? '#d29922' : '#3fb950';
+    el.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => el.classList.remove('show'), 2200);
+}
+
+// Date header
+document.getElementById('dateLabel').textContent = new Date().toLocaleDateString('en-US', {
+    weekday: 'long', year: 'numeric', month: 'long', day: 'numeric'
+});
+
+// Enter key on grams field
+document.getElementById('customGrams').addEventListener('keydown', e => {
+    if (e.key === 'Enter') addCustom();
+});
+
+// Refresh on tab focus (in case date changed)
+document.addEventListener('visibilitychange', () => { if (!document.hidden) render(); });
+
+render();
+</script>
+</body>
+</html>
