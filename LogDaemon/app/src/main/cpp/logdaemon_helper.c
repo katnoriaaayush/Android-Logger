@@ -1,18 +1,16 @@
-// LogDaemon native helper — Logv2
+// LogDaemon native helper — Logv3
 //
-// Self-contained daemon: no argv needed. Launched once at boot by
-// LogDaemonService and then runs forever under init's supervision.
+// Receives tagged log lines from LogDaemonService (user 0, always alive)
+// over abstract Unix socket @logdaemon, writes them to USB.
 //
-// Responsibilities:
-//   1. Single-instance guard via /proc/*/cmdline scan
-//   2. Double-fork + setsid() to detach from Android process group
-//   3. Outer loop: scan /mnt/media_rw/ for log.sinfo, run a capture
-//      session, reset, repeat — never exits except on SIGTERM
+// An 8 MB RAM ring buffer absorbs lines during FUSE mount gaps (profile
+// switches) so no data is lost. The socket server is always up; the
+// Android service reconnects automatically if needed.
 //
-// Per-session flow:
-//   find_usb() -> parse_config() -> create_session_dir() -> open_writers()
-//   -> write_pid_file() -> rescan_pids() -> spawn_logcat()
-//   -> read/filter/write loop -> cleanup -> reset_state() -> repeat
+// Flow:
+//   setup_socket_server() -> accept client -> receive "pkg\tline\n"
+//   -> write to USB files; on USB loss -> ring_store() -> on USB return
+//   -> ring_flush() -> resume writing
 
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -23,6 +21,9 @@
 #include <signal.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <sys/select.h>
 #include <sys/wait.h>
 #include <dirent.h>
 #include <time.h>
@@ -35,19 +36,15 @@
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, TAG, __VA_ARGS__)
 
-#define MAX_PACKAGES            16
-#define MAX_PIDS_PER_PKG         8
-#define MAX_LINE              8192
-#define PID_RESCAN_INTERVAL_SEC  2
-#define USB_CHECK_INTERVAL_SEC   5
-#define USB_MISSING_THRESHOLD    3   // 3 * 5s = 15s debounce for profile-switch
-#define USB_REMOUNT_TIMEOUT_SEC 10   // wait for USB after write failure
-#define USB_SCAN_INTERVAL_SEC    5   // outer-loop poll when no USB found
+#define MAX_PACKAGES          16
+#define MAX_LINE            8192
+#define USB_CHECK_INTERVAL_SEC  5
+#define USB_SCAN_INTERVAL_SEC   5
+#define RING_SIZE          (8 * 1024 * 1024)
+#define SOCKET_NAME        "logdaemon"
 
 typedef struct {
     char name[128];
-    int  pids[MAX_PIDS_PER_PKG];
-    int  pid_count;
     FILE *raw;
     FILE *tsv;
     long entries[6];  // V D I W E F
@@ -61,13 +58,26 @@ typedef struct {
     Package packages[MAX_PACKAGES];
     int     package_count;
     char    min_level;
-    pid_t   logcat_pid;
-    int     logcat_fd;
 } State;
 
-static State           g_state     = {0};
-static volatile int    g_running   = 1;
+static State           g_state          = {0};
+static volatile int    g_running        = 1;
 static char            g_hint_file[512] = "";
+
+// Socket
+static int             g_server_fd      = -1;
+static int             g_client_fd      = -1;
+
+// RAM ring buffer (BSS — only wired on first write)
+static char            g_ring[RING_SIZE];
+static size_t          g_ring_used      = 0;
+static int             g_ring_overflow  = 0;
+
+// Session state
+static int             g_session_open   = 0;
+static int             g_buffering      = 0;
+static time_t          g_session_start  = 0;
+static time_t          g_last_usb_check = 0;
 
 static void sigterm_handler(int sig) { (void)sig; g_running = 0; }
 
@@ -129,16 +139,13 @@ static void daemonize(void) {
 
 // ── USB discovery ─────────────────────────────────────────────────────────────
 
-// Resolve the best writable path for a given volume UUID.
-// Prefers /mnt/media_rw/<uuid>/ (raw vold FAT mount; survives profile-switch
-// FUSE teardowns). Falls back to /storage/<uuid>/ if /mnt/media_rw is blocked.
 static int resolve_usb_path(const char *uuid) {
     char media_rw[512], media_rw_cfg[768];
     snprintf(media_rw, sizeof(media_rw), "/mnt/media_rw/%s", uuid);
     snprintf(media_rw_cfg, sizeof(media_rw_cfg), "%s/log.sinfo", media_rw);
     if (access(media_rw_cfg, R_OK) == 0) {
         strncpy(g_state.usb_root, media_rw, sizeof(g_state.usb_root) - 1);
-        LOGI("USB path resolved: %s [raw vold mount]", g_state.usb_root);
+        LOGI("USB path: %s [raw vold mount]", g_state.usb_root);
         return 1;
     }
     LOGI("  /mnt/media_rw/%s not accessible (errno=%d: %s), trying /storage/",
@@ -148,8 +155,7 @@ static int resolve_usb_path(const char *uuid) {
     snprintf(storage_cfg, sizeof(storage_cfg), "%s/log.sinfo", storage);
     if (access(storage_cfg, R_OK) == 0) {
         strncpy(g_state.usb_root, storage, sizeof(g_state.usb_root) - 1);
-        LOGI("USB path resolved: %s [FUSE overlay — profile-switch may interrupt writes]",
-             g_state.usb_root);
+        LOGI("USB path: %s [FUSE overlay]", g_state.usb_root);
         return 1;
     }
     LOGE("  /storage/%s not accessible either (errno=%d: %s)", uuid, errno, strerror(errno));
@@ -159,11 +165,9 @@ static int resolve_usb_path(const char *uuid) {
 static int find_usb(void) {
     int found = 0;
 
-    // Scan /storage/ — always accessible, even when /mnt/media_rw/ listing is
-    // blocked by SELinux. Skip system pseudo-entries (self, emulated).
     DIR *d = opendir("/storage");
     if (!d) {
-        LOGE("opendir /storage failed (errno=%d: %s)", errno, strerror(errno));
+        LOGE("opendir /storage: %s", strerror(errno));
     } else {
         struct dirent *e;
         while ((e = readdir(d)) && !found) {
@@ -172,19 +176,15 @@ static int find_usb(void) {
             if (strcmp(e->d_name, "emulated") == 0) continue;
             char cfg[768];
             snprintf(cfg, sizeof(cfg), "/storage/%s/log.sinfo", e->d_name);
-            LOGD("Checking volume: /storage/%s  log.sinfo=%s",
-                 e->d_name, access(cfg, R_OK) == 0 ? "found" : "absent");
             if (access(cfg, R_OK) == 0) {
-                LOGI("log.sinfo found on volume %s, resolving write path...", e->d_name);
+                LOGI("log.sinfo found on volume %s", e->d_name);
                 found = resolve_usb_path(e->d_name);
             }
         }
         closedir(d);
     }
 
-    // Fallback: hint file written by LogDaemonService on USB mount events.
     if (!found && g_hint_file[0]) {
-        LOGD("Scan found nothing, checking hint file: %s", g_hint_file);
         FILE *hf = fopen(g_hint_file, "r");
         if (hf) {
             char hint[512] = {0};
@@ -196,14 +196,10 @@ static int find_usb(void) {
                 if (hint[0] && access(cfg, R_OK) == 0) {
                     strncpy(g_state.usb_root, hint, sizeof(g_state.usb_root) - 1);
                     found = 1;
-                    LOGI("USB path resolved: %s [from hint file]", g_state.usb_root);
-                } else {
-                    LOGD("Hint file contained '%s' but log.sinfo not accessible there", hint);
+                    LOGI("USB path: %s [hint file]", g_state.usb_root);
                 }
             }
             fclose(hf);
-        } else {
-            LOGD("Hint file not found or not readable: %s", g_hint_file);
         }
     }
 
@@ -250,7 +246,7 @@ static int parse_config(void) {
     }
     fclose(f);
 
-    LOGI("Parsed %d package(s), min_level=%c", g_state.package_count, g_state.min_level);
+    LOGI("Config: %d package(s), min_level=%c", g_state.package_count, g_state.min_level);
     return 0;
 }
 
@@ -271,7 +267,7 @@ static int create_session_dir(void) {
         LOGE("mkdir %s: %s", g_state.session_dir, strerror(errno));
         return -1;
     }
-    LOGI("Session: %s", g_state.session_dir);
+    LOGI("Session dir: %s", g_state.session_dir);
     return 0;
 }
 
@@ -294,25 +290,6 @@ static int open_writers(void) {
     return 0;
 }
 
-static int reopen_writers(void) {
-    for (int i = 0; i < g_state.package_count; i++) {
-        Package *pkg = &g_state.packages[i];
-        char path[1200];
-
-        snprintf(path, sizeof(path), "%s/%s.log", g_state.session_dir, pkg->name);
-        pkg->raw = fopen(path, "a");
-        if (!pkg->raw) { LOGE("Reopen %s: %s", path, strerror(errno)); return -1; }
-
-        snprintf(path, sizeof(path), "%s/%s.log.tsv", g_state.session_dir, pkg->name);
-        pkg->tsv = fopen(path, "a");
-        if (!pkg->tsv) {
-            LOGE("Reopen %s: %s", path, strerror(errno));
-            fclose(pkg->raw); pkg->raw = NULL;
-            return -1;
-        }
-    }
-    return 0;
-}
 
 static void close_writers(void) {
     for (int i = 0; i < g_state.package_count; i++) {
@@ -322,101 +299,15 @@ static void close_writers(void) {
     }
 }
 
+// Clears session state. Does NOT touch socket or ring buffer.
 static void reset_state(void) {
     close_writers();
-
-    if (g_state.logcat_pid > 0) {
-        kill(g_state.logcat_pid, SIGTERM);
-        waitpid(g_state.logcat_pid, NULL, 0);
-        g_state.logcat_pid = 0;
-    }
-    if (g_state.logcat_fd >= 0) {
-        close(g_state.logcat_fd);
-        g_state.logcat_fd = -1;
-    }
-
-    g_state.usb_root[0]     = 0;
-    g_state.session_dir[0]  = 0;
-    g_state.pid_file[0]     = 0;
-    g_state.package_count   = 0;
-    for (int i = 0; i < MAX_PACKAGES; i++) {
+    g_state.usb_root[0]    = 0;
+    g_state.session_dir[0] = 0;
+    g_state.pid_file[0]    = 0;
+    g_state.package_count  = 0;
+    for (int i = 0; i < MAX_PACKAGES; i++)
         memset(&g_state.packages[i], 0, sizeof(Package));
-    }
-}
-
-static int read_cmdline_pid(int pid, char *buf, size_t buflen) {
-    char path[64];
-    snprintf(path, sizeof(path), "/proc/%d/cmdline", pid);
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) return -1;
-    ssize_t n = read(fd, buf, buflen - 1);
-    close(fd);
-    if (n <= 0) return -1;
-    buf[n] = 0;
-    char *colon = strchr(buf, ':');
-    if (colon) *colon = 0;
-    return 0;
-}
-
-static void rescan_pids(void) {
-    DIR *d = opendir("/proc");
-    if (!d) return;
-
-    for (int i = 0; i < g_state.package_count; i++)
-        g_state.packages[i].pid_count = 0;
-
-    struct dirent *e;
-    while ((e = readdir(d))) {
-        if (e->d_type != DT_DIR) continue;
-        int pid = atoi(e->d_name);
-        if (pid <= 0) continue;
-
-        char cmdline[256];
-        if (read_cmdline_pid(pid, cmdline, sizeof(cmdline)) < 0) continue;
-
-        for (int i = 0; i < g_state.package_count; i++) {
-            Package *pkg = &g_state.packages[i];
-            if (strcmp(cmdline, pkg->name) == 0 && pkg->pid_count < MAX_PIDS_PER_PKG)
-                pkg->pids[pkg->pid_count++] = pid;
-        }
-    }
-    closedir(d);
-}
-
-static int pid_to_package(int pid) {
-    for (int i = 0; i < g_state.package_count; i++) {
-        Package *pkg = &g_state.packages[i];
-        for (int j = 0; j < pkg->pid_count; j++) {
-            if (pkg->pids[j] == pid) return i;
-        }
-    }
-    return -1;
-}
-
-static int spawn_logcat(void) {
-    int pipefd[2];
-    if (pipe(pipefd) < 0) return -1;
-
-    pid_t pid = fork();
-    if (pid < 0) { close(pipefd[0]); close(pipefd[1]); return -1; }
-
-    if (pid == 0) {
-        close(pipefd[0]);
-        dup2(pipefd[1], STDOUT_FILENO);
-        dup2(pipefd[1], STDERR_FILENO);
-        close(pipefd[1]);
-
-        char level[8];
-        snprintf(level, sizeof(level), "*:%c", g_state.min_level);
-        execl("/system/bin/logcat", "logcat", "-v", "threadtime", level, NULL);
-        _exit(127);
-    }
-
-    close(pipefd[1]);
-    g_state.logcat_pid = pid;
-    g_state.logcat_fd  = pipefd[0];
-    LOGI("Spawned logcat pid=%d level=*:%c", pid, g_state.min_level);
-    return 0;
 }
 
 typedef struct {
@@ -442,8 +333,8 @@ static int parse_line(const char *line, LogEntry *e) {
              tm.tm_year + 1900, date, time_s);
     e->pid = pid; e->tid = tid; e->level = level;
 
-    const char *rest   = line + consumed;
-    const char *colon  = strstr(rest, ": ");
+    const char *rest  = line + consumed;
+    const char *colon = strstr(rest, ": ");
     if (colon) {
         size_t tag_len = (size_t)(colon - rest);
         if (tag_len >= sizeof(e->tag)) tag_len = sizeof(e->tag) - 1;
@@ -500,7 +391,7 @@ static int write_entry(int pkg_idx, const LogEntry *e, const char *raw_line) {
 
 static int usb_present(void) {
     struct stat st;
-    return (stat(g_state.session_dir, &st) == 0);
+    return (g_state.session_dir[0] && stat(g_state.session_dir, &st) == 0);
 }
 
 static void write_pid_file(void) {
@@ -522,6 +413,7 @@ static void write_session_meta(time_t start_time) {
     fprintf(f, "session_start=%s\n", ts);
     fprintf(f, "min_level=%c\n", g_state.min_level);
     fprintf(f, "helper_pid=%d\n", getpid());
+    fprintf(f, "logv3=1\n");
     fprintf(f, "packages:\n");
     for (int i = 0; i < g_state.package_count; i++)
         fprintf(f, "  - %s\n", g_state.packages[i].name);
@@ -545,181 +437,305 @@ static void write_summary(time_t start_t, time_t end_t) {
     fclose(f);
 }
 
-// ── capture session ──────────────────────────────────────────────────────────
+// ── socket server ─────────────────────────────────────────────────────────────
 
-static void run_session(void) {
-    write_pid_file();
-
-    time_t session_start = time(NULL);
-    write_session_meta(session_start);
-    rescan_pids();
-
-    if (spawn_logcat() < 0) {
-        LOGE("spawn_logcat failed");
-        return;
+static int setup_socket_server(void) {
+    g_server_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (g_server_fd < 0) {
+        LOGE("socket: %s", strerror(errno));
+        return -1;
     }
 
-    FILE *logf = fdopen(g_state.logcat_fd, "r");
-    if (!logf) {
-        LOGE("fdopen logcat_fd failed");
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    // Abstract socket: sun_path[0] = '\0', name at sun_path[1]
+    memcpy(addr.sun_path + 1, SOCKET_NAME, strlen(SOCKET_NAME));
+    socklen_t addrlen = (socklen_t)(sizeof(sa_family_t) + 1 + strlen(SOCKET_NAME));
+
+    if (bind(g_server_fd, (struct sockaddr *)&addr, addrlen) < 0) {
+        LOGE("bind @%s: %s", SOCKET_NAME, strerror(errno));
+        close(g_server_fd);
+        g_server_fd = -1;
+        return -1;
+    }
+    if (listen(g_server_fd, 1) < 0) {
+        LOGE("listen: %s", strerror(errno));
+        close(g_server_fd);
+        g_server_fd = -1;
+        return -1;
+    }
+    LOGI("Socket server ready @%s", SOCKET_NAME);
+    return 0;
+}
+
+// Read one newline-terminated line from fd. Returns length (without '\n'),
+// 0 on EOF, -1 on error. Result is always null-terminated.
+static int read_line_fd(int fd, char *buf, size_t bufsize) {
+    size_t n = 0;
+    while (n < bufsize - 1) {
+        char c;
+        ssize_t r = read(fd, &c, 1);
+        if (r < 0) return (errno == EINTR) ? 0 : -1;
+        if (r == 0) return (int)n;  // EOF
+        if (c == '\n') break;
+        buf[n++] = c;
+    }
+    buf[n] = '\0';
+    return (int)n;
+}
+
+// ── ring buffer ───────────────────────────────────────────────────────────────
+
+static void ring_store(const char *line, size_t len) {
+    if (g_ring_used + len + 1 > RING_SIZE) {
+        if (!g_ring_overflow) {
+            LOGE("Ring buffer full (%d MB), dropping oldest data", RING_SIZE / (1024 * 1024));
+            g_ring_overflow = 1;
+        }
         return;
     }
-    g_state.logcat_fd = -1;  // logf owns it now
+    memcpy(g_ring + g_ring_used, line, len);
+    g_ring[g_ring_used + len] = '\0';
+    g_ring_used += len + 1;
+}
 
-    char line[MAX_LINE];
-    time_t last_rescan    = time(NULL);
-    time_t last_usb_check = time(NULL);
-    int    usb_missing    = 0;
-    long   lines_total    = 0, lines_matched = 0;
+static int find_package_idx(const char *name) {
+    for (int i = 0; i < g_state.package_count; i++) {
+        if (strcmp(g_state.packages[i].name, name) == 0) return i;
+    }
+    return -1;
+}
 
-    while (g_running && fgets(line, sizeof(line), logf)) {
-        size_t l = strlen(line);
-        while (l > 0 && (line[l-1] == '\n' || line[l-1] == '\r')) line[--l] = 0;
-        if (l == 0) continue;
-        lines_total++;
+// Flush all buffered lines to open writers. Clears the ring on success or
+// on write failure (data loss accepted to avoid infinite retry loops).
+static void ring_flush(void) {
+    if (g_ring_used == 0) return;
+    LOGI("Flushing ring: %zu bytes, overflow=%d", g_ring_used, g_ring_overflow);
+    size_t pos = 0;
+    long flushed = 0, skipped = 0;
+    while (pos < g_ring_used) {
+        const char *entry = g_ring + pos;
+        size_t entry_len = strlen(entry);
+        pos += entry_len + 1;
 
+        // entry format: "pkg_name\traw_logcat_line"
+        const char *tab = memchr(entry, '\t', entry_len);
+        if (!tab) { skipped++; continue; }
+
+        char pkg_name[128];
+        size_t pkg_len = (size_t)(tab - entry);
+        if (pkg_len >= sizeof(pkg_name)) pkg_len = sizeof(pkg_name) - 1;
+        memcpy(pkg_name, entry, pkg_len);
+        pkg_name[pkg_len] = '\0';
+
+        int idx = find_package_idx(pkg_name);
+        if (idx < 0) { skipped++; continue; }
+
+        const char *raw_line = tab + 1;
         LogEntry e;
-        if (parse_line(line, &e) == 0) {
-            int idx = pid_to_package(e.pid);
-            if (idx >= 0) {
-                if (write_entry(idx, &e, line) < 0) {
-                    LOGI("Write failed — waiting up to %ds for USB remount",
-                         USB_REMOUNT_TIMEOUT_SEC);
-                    close_writers();
-                    int recovered = 0;
-                    for (int r = 0; r < USB_REMOUNT_TIMEOUT_SEC && g_running; r++) {
-                        sleep(1);
-                        if (usb_present() && reopen_writers() == 0) {
-                            time_t gap_t = time(NULL);
-                            struct tm gap_tm;
-                            localtime_r(&gap_t, &gap_tm);
-                            char gap_ts[32];
-                            strftime(gap_ts, sizeof(gap_ts), "%Y-%m-%d %H:%M:%S", &gap_tm);
-                            for (int j = 0; j < g_state.package_count; j++) {
-                                if (g_state.packages[j].raw) {
-                                    fprintf(g_state.packages[j].raw,
-                                            "--- USB remount gap ended at %s ---\n", gap_ts);
-                                    fflush(g_state.packages[j].raw);
-                                }
-                            }
-                            LOGI("USB remounted after %ds, session continuing", r + 1);
-                            recovered = 1;
-                            break;
-                        }
-                    }
-                    if (!recovered) {
-                        LOGE("USB not recovered after %ds, ending session",
-                             USB_REMOUNT_TIMEOUT_SEC);
-                        break;  // end this session; outer loop resets and rescans
-                    }
-                }
-                lines_matched++;
-            }
-        }
+        if (parse_line(raw_line, &e) < 0) { skipped++; continue; }
 
-        time_t now = time(NULL);
-        if (now - last_rescan >= PID_RESCAN_INTERVAL_SEC) {
-            rescan_pids();
-            last_rescan = now;
+        if (write_entry(idx, &e, raw_line) < 0) {
+            LOGE("ring_flush: write failed at entry %ld, discarding ring", flushed);
+            break;
         }
-        if (now - last_usb_check >= USB_CHECK_INTERVAL_SEC) {
-            if (!usb_present()) {
-                usb_missing++;
-                LOGI("USB session dir missing (%d/%d)", usb_missing, USB_MISSING_THRESHOLD);
-                if (usb_missing >= USB_MISSING_THRESHOLD) {
-                    LOGI("USB confirmed gone, ending session");
-                    break;
-                }
-            } else {
-                usb_missing = 0;
-            }
-            last_usb_check = now;
+        flushed++;
+    }
+    LOGI("Ring flush: %ld written, %ld skipped", flushed, skipped);
+    g_ring_used = 0;
+    g_ring_overflow = 0;
+}
+
+// ── session lifecycle ─────────────────────────────────────────────────────────
+
+// Called when USB goes away or a write fails. Writes summary, tears down
+// writers, enters buffering mode, and resets state for fresh USB scan.
+static void end_session(void) {
+    if (g_session_open) {
+        write_summary(g_session_start, time(NULL));
+        if (g_state.pid_file[0]) unlink(g_state.pid_file);
+        g_session_open = 0;
+        g_buffering    = 1;
+    }
+    reset_state();
+    g_last_usb_check = 0;  // force immediate USB rescan on next loop tick
+}
+
+// Attempt to find USB, parse config, and open a new write session.
+// On success, flushes the ring buffer. Returns 1 on success, 0 on failure.
+static int try_open_session(void) {
+    if (g_state.usb_root[0] == '\0' && !find_usb()) return 0;
+
+    if (g_state.package_count == 0) {
+        if (parse_config() < 0 || g_state.package_count == 0) {
+            LOGE("No valid packages in config, rescanning");
+            reset_state();
+            return 0;
         }
     }
 
-    LOGI("Session loop exit: total=%ld matched=%ld", lines_total, lines_matched);
+    if (create_session_dir() < 0) { reset_state(); return 0; }
+    if (open_writers() < 0)       { reset_state(); return 0; }
 
-    if (g_state.logcat_pid > 0) {
-        kill(g_state.logcat_pid, SIGTERM);
-        int status;
-        waitpid(g_state.logcat_pid, &status, 0);
-        g_state.logcat_pid = 0;
+    write_pid_file();
+    g_session_start = time(NULL);
+    write_session_meta(g_session_start);
+    g_session_open = 1;
+    g_buffering    = 0;
+
+    LOGI("Session open: %s | ring=%zu bytes buffered", g_state.session_dir, g_ring_used);
+    if (g_ring_used > 0) ring_flush();
+    return 1;
+}
+
+// ── tagged line processing ────────────────────────────────────────────────────
+
+// Process one "pkg_name\traw_logcat_line" from the socket.
+// Writes directly to USB if session is open; otherwise buffers to ring.
+static void process_tagged_line(const char *line) {
+    size_t len = strlen(line);
+    if (len == 0) return;
+
+    if (!g_session_open) {
+        ring_store(line, len);
+        return;
     }
-    fclose(logf);
 
-    close_writers();
-    write_summary(session_start, time(NULL));
-    if (g_state.pid_file[0]) unlink(g_state.pid_file);
+    const char *tab = memchr(line, '\t', len);
+    if (!tab) return;
+
+    char pkg_name[128];
+    size_t pkg_len = (size_t)(tab - line);
+    if (pkg_len >= sizeof(pkg_name)) pkg_len = sizeof(pkg_name) - 1;
+    memcpy(pkg_name, line, pkg_len);
+    pkg_name[pkg_len] = '\0';
+
+    int idx = find_package_idx(pkg_name);
+    if (idx < 0) return;
+
+    const char *raw_line = tab + 1;
+    LogEntry e;
+    if (parse_line(raw_line, &e) < 0) return;
+
+    if (write_entry(idx, &e, raw_line) < 0) {
+        LOGI("Write failed, buffering line and entering buffer mode");
+        ring_store(line, len);
+        end_session();
+    }
 }
 
 // ── main ─────────────────────────────────────────────────────────────────────
 
 int main(int argc, char **argv) {
-    // Pre-daemonize instance check
     if (another_instance_running()) {
-        LOGI("Another helper instance already running, exiting");
+        LOGI("Another helper instance running, exiting");
         return 0;
     }
 
-    // Hint file path comes from LOGDAEMON_HINT_FILE env var set by LogDaemonService.
-    // The service updates this file on every USB mount event, so the running helper
-    // can discover hot-plugged USB drives even if opendir("/mnt/media_rw") is blocked.
+    // Hint file path from env var set by LogDaemonService at launch
     const char *env_hint = getenv("LOGDAEMON_HINT_FILE");
     if (env_hint && env_hint[0]) {
         strncpy(g_hint_file, env_hint, sizeof(g_hint_file) - 1);
-        LOGI("Hint file path: %s", g_hint_file);
+        LOGI("Hint file: %s", g_hint_file);
     }
 
-    // Accept optional argv[1] as USB root hint from the launcher (LogDaemonService
-    // passes it when it can discover the USB path via Android StorageManager APIs).
-    // The hint is validated before use; the helper falls back to find_usb() if
-    // the hint is absent or the path no longer has log.sinfo.
-    if (argc >= 2 && argv[1] && argv[1][0] != '\0') {
-        char cfg_hint[768];
-        snprintf(cfg_hint, sizeof(cfg_hint), "%s/log.sinfo", argv[1]);
-        if (access(cfg_hint, R_OK) == 0) {
+    // Optional argv[1]: USB root pre-validated by LogDaemonService
+    if (argc >= 2 && argv[1] && argv[1][0]) {
+        char cfg[768];
+        snprintf(cfg, sizeof(cfg), "%s/log.sinfo", argv[1]);
+        if (access(cfg, R_OK) == 0) {
             strncpy(g_state.usb_root, argv[1], sizeof(g_state.usb_root) - 1);
-            LOGI("USB hint accepted from launcher: %s", g_state.usb_root);
+            LOGI("USB hint from launcher: %s", g_state.usb_root);
         } else {
-            LOGI("USB hint invalid (no log.sinfo at %s), will scan", argv[1]);
+            LOGI("USB hint invalid (%s), will scan", argv[1]);
         }
     }
 
     daemonize();
 
-    // Post-daemonize re-check closes the fork race window
     if (another_instance_running()) {
-        LOGI("Another instance detected after daemonize, exiting");
+        LOGI("Another instance after daemonize, exiting");
         return 0;
     }
 
-    LOGI("Helper started pid=%d", getpid());
+    LOGI("Helper started pid=%d (Logv3)", getpid());
 
-    while (g_running) {
-        // Use the validated hint on the first iteration; scan on subsequent ones.
-        if (g_state.usb_root[0] == '\0' && !find_usb()) {
-            LOGD("No USB with log.sinfo, retrying in %ds", USB_SCAN_INTERVAL_SEC);
-            sleep(USB_SCAN_INTERVAL_SEC);
-            continue;
-        }
-
-        LOGI("USB found at %s", g_state.usb_root);
-
-        if (parse_config() < 0 || g_state.package_count == 0) {
-            LOGE("Config invalid or empty, rescanning");
-            reset_state();
-            sleep(USB_SCAN_INTERVAL_SEC);
-            continue;
-        }
-        if (create_session_dir() < 0) { reset_state(); continue; }
-        if (open_writers() < 0)       { reset_state(); continue; }
-
-        run_session();
-
-        LOGI("Session ended, rescanning for USB");
-        reset_state();
+    if (setup_socket_server() < 0) {
+        LOGE("Socket setup failed, exiting");
+        return 1;
     }
 
+    while (g_running) {
+        // Periodically try to open a session when none is active
+        time_t now = time(NULL);
+        if (!g_session_open && (now - g_last_usb_check >= USB_SCAN_INTERVAL_SEC)) {
+            g_last_usb_check = now;
+            try_open_session();
+        }
+
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        if (g_server_fd >= 0) FD_SET(g_server_fd, &rfds);
+        if (g_client_fd >= 0) FD_SET(g_client_fd, &rfds);
+
+        int maxfd = (g_server_fd > g_client_fd) ? g_server_fd : g_client_fd;
+        if (maxfd < 0) { sleep(1); continue; }
+
+        struct timeval tv = {1, 0};
+        int ret = select(maxfd + 1, &rfds, NULL, NULL, &tv);
+
+        if (ret < 0) {
+            if (errno == EINTR) continue;
+            LOGE("select: %s", strerror(errno));
+            break;
+        }
+
+        if (ret == 0) {
+            // 1s tick: periodic USB health check when session is open
+            if (g_session_open) {
+                now = time(NULL);
+                if (now - g_last_usb_check >= USB_CHECK_INTERVAL_SEC) {
+                    g_last_usb_check = now;
+                    if (!usb_present()) {
+                        LOGI("USB session dir gone, ending session");
+                        end_session();
+                    }
+                }
+            }
+            continue;
+        }
+
+        // New client connection
+        if (g_server_fd >= 0 && FD_ISSET(g_server_fd, &rfds)) {
+            int new_fd = accept(g_server_fd, NULL, NULL);
+            if (new_fd >= 0) {
+                if (g_client_fd >= 0) {
+                    LOGI("Replacing existing client connection");
+                    close(g_client_fd);
+                }
+                g_client_fd = new_fd;
+                LOGI("Client connected fd=%d", g_client_fd);
+            }
+        }
+
+        // Data from client
+        if (g_client_fd >= 0 && FD_ISSET(g_client_fd, &rfds)) {
+            char line[MAX_LINE];
+            int n = read_line_fd(g_client_fd, line, sizeof(line));
+            if (n <= 0) {
+                LOGI("Client disconnected (n=%d)", n);
+                close(g_client_fd);
+                g_client_fd = -1;
+            } else {
+                process_tagged_line(line);
+            }
+        }
+    }
+
+    if (g_session_open) end_session();
+    if (g_client_fd >= 0) close(g_client_fd);
+    if (g_server_fd >= 0) close(g_server_fd);
     LOGI("Helper exiting");
     return 0;
 }
