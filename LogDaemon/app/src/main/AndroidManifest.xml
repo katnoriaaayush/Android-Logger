@@ -36,12 +36,13 @@
         android:directBootAware="true"
         tools:ignore="AllowBackup">
 
-        <!-- Boot receiver: starts the service when the device boots -->
+        <!-- Boot receiver: starts the service in every user (owner + user profiles).
+             singleUser removed so BOOT_COMPLETED fires in user 1 too, allowing
+             that user's service instance to capture its own logcat lines. -->
         <receiver
             android:name=".BootReceiver"
             android:enabled="true"
             android:exported="true"
-            android:singleUser="true"
             android:directBootAware="true">
             <intent-filter android:priority="999">
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
@@ -63,15 +64,16 @@
         </receiver>
 
         <!--
-            One-shot launcher service: checks if helper is alive, launches it if not,
-            then calls stopSelf(). The native helper outlives this service.
+            Long-running capture service. Runs in every user (no singleUser) so each
+            user's instance captures logcat for that user's own processes and streams
+            lines to the native helper via abstract socket @logdaemon.
+            The service itself skips capture for SecureFolder (user ≥ 2) — see captureLoop().
             No <intent-filter> for LAUNCHER => no launcher icon.
         -->
         <service
             android:name=".LogDaemonService"
             android:enabled="true"
             android:exported="false"
-            android:singleUser="true"
             android:stopWithTask="false"
             android:directBootAware="true" />
 

@@ -5,6 +5,8 @@ import android.content.Intent
 import android.net.LocalSocket
 import android.net.LocalSocketAddress
 import android.os.IBinder
+import android.os.Process
+import android.os.UserHandle
 import android.util.Log
 import kotlinx.coroutines.*
 import java.io.File
@@ -30,18 +32,24 @@ class LogDaemonService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        Log.i(TAG, "LogDaemonService created (Logv3)")
+        val myUser = UserHandle.getUserId(Process.myUid())
+        Log.i(TAG, "LogDaemonService created (Logv3, user=$myUser)")
 
-        val usbHint = findUsbHint()
-        if (usbHint != null) writeHintFile(usbHint)
-
-        if (!isHelperAlive()) launchHelper(usbHint)
+        // Only user 0 manages USB hint and launches the native helper.
+        // The helper is a single native process; user 0 owns it.
+        if (myUser == 0) {
+            val usbHint = findUsbHint()
+            if (usbHint != null) writeHintFile(usbHint)
+            if (!isHelperAlive()) launchHelper(usbHint)
+        }
 
         scope.launch { captureLoop() }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == Intent.ACTION_MEDIA_MOUNTED) {
+        // USB mount events are only relevant in user 0 — MEDIA_MOUNTED fires there.
+        if (intent?.action == Intent.ACTION_MEDIA_MOUNTED &&
+            UserHandle.getUserId(Process.myUid()) == 0) {
             val usbPath = usbPathFromIntent(intent) ?: findUsbHint()
             if (usbPath != null) {
                 Log.i(TAG, "USB mounted: $usbPath — updating hint file")
@@ -66,6 +74,17 @@ class LogDaemonService : Service() {
     // ── capture loop ──────────────────────────────────────────────────────────
 
     private suspend fun captureLoop() {
+        val myUser = UserHandle.getUserId(Process.myUid())
+
+        // SecureFolder and Work Profiles run as user ≥ 2. Logcat in those users
+        // is isolated to their own processes — not useful for our use case.
+        // User 0 (owner) and user 1 (secondary user profile) are the targets.
+        if (myUser >= 2) {
+            Log.i(TAG, "captureLoop: user=$myUser is SecureFolder/Work Profile, skipping capture")
+            return
+        }
+        Log.i(TAG, "captureLoop: user=$myUser starting")
+
         while (true) {
             try {
                 Log.i(TAG, "captureLoop: waiting for USB")
@@ -132,14 +151,21 @@ class LogDaemonService : Service() {
     }
 
     // Connect to the helper's abstract Unix socket @logdaemon.
-    // Relaunches the helper if it is not alive. Returns null after 5 attempts.
+    // Only user 0 relaunches the helper; user 1 waits for it to appear.
+    // Returns null after 5 attempts.
     private suspend fun connectToHelper(): LocalSocket? {
+        val myUser = UserHandle.getUserId(Process.myUid())
         repeat(5) { attempt ->
             if (!isHelperAlive()) {
-                val hint = findUsbHint()
-                Log.i(TAG, "Helper not alive, launching (attempt ${attempt + 1})")
-                launchHelper(hint)
-                delay(800)
+                if (myUser == 0) {
+                    val hint = findUsbHint()
+                    Log.i(TAG, "Helper not alive, launching (attempt ${attempt + 1})")
+                    launchHelper(hint)
+                    delay(800)
+                } else {
+                    Log.i(TAG, "Helper not alive yet (user=$myUser, attempt ${attempt + 1}), waiting...")
+                    delay(2_000)
+                }
             }
             try {
                 val socket = LocalSocket()
