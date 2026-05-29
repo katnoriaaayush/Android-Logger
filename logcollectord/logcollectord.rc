@@ -1,0 +1,20 @@
+# /system/etc/init/logcollectord.rc
+#
+# Init service definition for logcollectord.
+#
+# Required groups:
+#   log       — read logd socket (AID 1007)
+#   media_rw  — read /mnt/media_rw/<UUID> (USB) and write /data/media (AID 1023)
+#
+# SELinux note:
+#   seclabel u:r:shell:s0 is a dev-mode workaround that runs the daemon under
+#   the shell domain (which has broad access on most debug/root builds).
+#   For a production enforcing-mode firmware, replace with a custom type and
+#   add the corresponding policy (.te file or .cil).  See README.md for details.
+
+service logcollectord /system/bin/logcollectord
+    class late_start
+    user root
+    group root log media_rw sdcard_rw
+    seclabel u:r:shell:s0
+    # no oneshot — init will restart the daemon if it crashes

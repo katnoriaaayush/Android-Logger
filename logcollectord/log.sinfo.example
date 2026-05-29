@@ -1,0 +1,32 @@
+# =============================================================================
+# logcollectord configuration file
+# =============================================================================
+# Place this file at the root of a USB drive (FAT32 or exFAT).
+# Name it exactly:  log.sinfo
+#
+# When the drive is attached, logcollectord will:
+#   1. Parse this file
+#   2. Open /data/media/0/Download/logcollect_<timestamp>.txt
+#   3. Stream logcat output and write lines from the listed packages
+#   4. Continue seamlessly across Android user-profile switches
+#   5. Close and trigger a media scan when the USB is removed
+#
+# Format: INI-style
+#   - Lines starting with # or ; are comments
+#   - Blank lines are ignored
+#   - Sections in [brackets]
+#   - Unknown keys are silently ignored (safe to add future options)
+# =============================================================================
+
+[packages]
+# One package name per line.
+# Works for both system apps (e.g. com.android.settings) and user apps.
+# Named processes (e.g. com.foo.app:push) are matched by base package name.
+com.example.mainapp
+com.example.launcher
+com.android.settings
+
+[options]
+# Minimum log level passed to logcat: V, D, I, W, E  (default: D)
+# Higher levels produce less output and miss debug/verbose messages.
+min_level=D
