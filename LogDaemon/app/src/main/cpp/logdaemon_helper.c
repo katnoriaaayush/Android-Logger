@@ -41,6 +41,10 @@
 #define USB_CHECK_INTERVAL_SEC    5
 #define USB_SCAN_INTERVAL_SEC     5
 
+// Survives daemon restarts (internal storage, not USB).
+// Holds last-written logcat timestamp so -T can replay the gap.
+#define RESUME_FILE "/data/local/tmp/.logdaemon_ts"
+
 typedef struct {
     char name[128];
     int  pids[MAX_PIDS_PER_PKG];
@@ -284,7 +288,17 @@ static int pid_to_package(int pid) {
 // ── logcat ────────────────────────────────────────────────────────────────────
 
 // Spawn logcat as root. logd sends ALL users' log entries to root readers.
+// On restart after vold SIGTERM, reads RESUME_FILE and passes -T <timestamp>
+// so logd replays buffered lines from the gap — no logs lost.
 static int spawn_logcat(void) {
+    char resume_ts[64] = {0};
+    FILE *rf = fopen(RESUME_FILE, "r");
+    if (rf) {
+        if (fgets(resume_ts, sizeof(resume_ts), rf))
+            resume_ts[strcspn(resume_ts, "\n\r")] = 0;
+        fclose(rf);
+    }
+
     int pipefd[2];
     if (pipe(pipefd) < 0) return -1;
 
@@ -298,22 +312,29 @@ static int spawn_logcat(void) {
         close(pipefd[1]);
         char level[8];
         snprintf(level, sizeof(level), "*:%c", g_state.min_level);
-        execl("/system/bin/logcat", "logcat", "-v", "threadtime", level, NULL);
+        if (resume_ts[0])
+            execl("/system/bin/logcat", "logcat", "-v", "threadtime",
+                  "-T", resume_ts, level, NULL);
+        else
+            execl("/system/bin/logcat", "logcat", "-v", "threadtime", level, NULL);
         _exit(127);
     }
 
     close(pipefd[1]);
     g_state.logcat_pid = pid;
     g_state.logcat_fd  = pipefd[0];
-    LOGI("logcat pid=%d level=*:%c (root — all user profiles)",
-         pid, g_state.min_level);
+    if (resume_ts[0])
+        LOGI("logcat pid=%d — resuming from %s", pid, resume_ts);
+    else
+        LOGI("logcat pid=%d level=*:%c (root — all user profiles)", pid, g_state.min_level);
     return 0;
 }
 
 // ── log entry parsing & writing ───────────────────────────────────────────────
 
 typedef struct {
-    char timestamp[32];
+    char timestamp[32];  // "YYYY-MM-DD HH:MM:SS.mmm" written to TSV
+    char raw_ts[32];     // "MM-DD HH:MM:SS.mmm" for logcat -T resume
     int  pid, tid;
     char level;
     char tag[256];
@@ -333,6 +354,7 @@ static int parse_line(const char *line, LogEntry *e) {
     localtime_r(&now, &tm);
     snprintf(e->timestamp, sizeof(e->timestamp), "%d-%s %s",
              tm.tm_year + 1900, date, time_s);
+    snprintf(e->raw_ts, sizeof(e->raw_ts), "%s %s", date, time_s);
     e->pid = pid; e->tid = tid; e->level = level;
 
     const char *rest  = line + consumed;
@@ -382,7 +404,13 @@ static int write_entry(int pkg_idx, const LogEntry *e, const char *raw_line) {
 
     pkg->total++;
     pkg->entries[level_idx(e->level)]++;
-    if ((pkg->total & 0x3F) == 0) { fflush(pkg->raw); fflush(pkg->tsv); }
+    if ((pkg->total & 0x3F) == 0) {
+        fflush(pkg->raw);
+        fflush(pkg->tsv);
+        // Checkpoint: if vold kills us, next restart replays from here
+        FILE *cf = fopen(RESUME_FILE, "w");
+        if (cf) { fprintf(cf, "%s\n", e->raw_ts); fclose(cf); }
+    }
     return 0;
 }
 
