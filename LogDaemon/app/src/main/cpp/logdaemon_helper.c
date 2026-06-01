@@ -65,7 +65,14 @@ typedef struct {
 static State        g_state   = {0};
 static volatile int g_running = 1;
 
-static void sigterm_handler(int sig) { (void)sig; g_running = 0; }
+static void sigterm_handler(int sig) {
+    (void)sig;
+    g_running = 0;
+    // Kill logcat child immediately so fgets() gets EOF and the
+    // capture loop exits without waiting for the next log line.
+    if (g_state.logcat_pid > 0)
+        kill(g_state.logcat_pid, SIGTERM);
+}
 
 // ── USB discovery ─────────────────────────────────────────────────────────────
 

@@ -12,8 +12,8 @@ service logdaemon /system/bin/logdaemon
     user root
     group root media_rw
     seclabel u:r:shell:s0
-    oneshot
     disabled
+    restart_period 5
 
 # Start once the file-based encryption (FBE) credential-encrypted storage
 # is unlocked for user 0, which is when vold has mounted USB FAT volumes.
