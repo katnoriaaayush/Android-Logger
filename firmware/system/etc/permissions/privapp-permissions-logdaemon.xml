@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Privapp permissions whitelist for LogDaemon.
+    Install to: /system/etc/permissions/privapp-permissions-logdaemon.xml
+
+    Required because:
+      - READ_LOGS is a PROTECTION_SIGNATURE|PROTECTION_FLAG_PRIVILEGED permission.
+      - QUERY_ALL_PACKAGES is enforced on Android 12+ priv-apps.
+      - Without this file the PackageManager denies these permissions at boot,
+        even when the APK is in /system/priv-app/ and signed with the platform key.
+
+    NOTE: For Logv4 (init.rc daemon), the APK is optional — the native binary
+    runs as root and does not require these permissions. Keep this file if the
+    companion APK (for BootReceiver / UsbStateReceiver) is also installed.
+-->
+<permissions>
+    <privapp-permissions package="com.sqa.logdaemon">
+        <permission name="android.permission.READ_LOGS" />
+        <permission name="android.permission.QUERY_ALL_PACKAGES" />
+        <permission name="android.permission.WRITE_MEDIA_STORAGE" />
+    </privapp-permissions>
+</permissions>
