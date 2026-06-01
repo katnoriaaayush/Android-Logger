@@ -190,9 +190,20 @@ class LogDaemonService : Service() {
 
         val writer = OutputStreamWriter(socket.outputStream, Charsets.UTF_8)
 
-        val proc = ProcessBuilder("/system/bin/logcat", "-v", "threadtime", "*:V")
-            .redirectErrorStream(false)
-            .start()
+        // Run logcat as root so logd sends entries from ALL user profiles.
+        // Root UID (0) is always a privileged reader in logd — no per-user filter.
+        // Falls back to direct logcat if su is unavailable.
+        val proc = if (File("/system/bin/su").exists() || File("/sbin/su").exists()) {
+            Log.i(TAG, "Spawning logcat via su (root — all-user logs)")
+            ProcessBuilder("su", "-c", "/system/bin/logcat -v threadtime *:V")
+                .redirectErrorStream(false)
+                .start()
+        } else {
+            Log.w(TAG, "su not found, spawning logcat as self (owner-only logs)")
+            ProcessBuilder("/system/bin/logcat", "-v", "threadtime", "*:V")
+                .redirectErrorStream(false)
+                .start()
+        }
 
         try {
             val reader = proc.inputStream.bufferedReader(Charsets.UTF_8)
