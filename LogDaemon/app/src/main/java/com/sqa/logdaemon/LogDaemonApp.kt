@@ -11,8 +11,5 @@ class LogDaemonApp : Application() {
 
     companion object {
         const val TAG = "LogDaemon"
-
-        @Volatile
-        var serviceRunning = false
     }
 }

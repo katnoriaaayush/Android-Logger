@@ -2,177 +2,361 @@ package com.sqa.logdaemon
 
 import android.app.Service
 import android.content.Intent
-import android.hardware.usb.UsbManager
+import android.net.LocalSocket
+import android.net.LocalSocketAddress
 import android.os.IBinder
+import android.os.Process
+import android.os.UserHandle
 import android.util.Log
-import com.sqa.logdaemon.usb.UsbMountLocator
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.*
 import java.io.File
+import java.io.OutputStreamWriter
 
 /**
- * Thin launcher for the native helper daemon.
+ * Long-running user-0 service that captures logcat and streams filtered
+ * lines to the native helper over abstract Unix socket @logdaemon.
  *
- * The actual log capture runs in a native binary (liblogdaemon_helper.so) that
- * is bundled in the APK's lib/<abi>/ directory and extracted by the package
- * manager to applicationInfo.nativeLibraryDir at install time. This service
- * forks the helper with ProcessBuilder; the helper immediately calls setsid()
- * to detach itself, becoming reparented to init (PID 1) and surviving Samsung's
- * profile-switch kills of this Android service.
+ * Responsibilities:
+ *   - Launch the native helper if not already running
+ *   - captureLoop(): wait for USB → parse log.sinfo → connect to helper
+ *     → spawn logcat, scan PIDs, stream "pkg\tline\n" indefinitely
+ *   - On USB mount events: update hint file, relaunch helper if dead
  *
- * Lifecycle:
- *   USB ATTACHED  -> find USB with log.sinfo -> if no helper running, launch one
- *   USB DETACHED  -> helper detects USB removal itself and exits; we just clear state
- *   Service restart (profile switch) -> if helper still alive, do nothing; else relaunch
+ * The helper owns USB writes and the 8 MB ring buffer for FUSE gaps.
+ * This service is intentionally singleUser=true (logcat is global —
+ * user 0 sees all profiles). It must not be stopped while running.
  */
 class LogDaemonService : Service() {
 
-    private val daemonScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-
-    @Volatile
-    private var currentUsbPath: String? = null
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     override fun onCreate() {
         super.onCreate()
-        LogDaemonApp.serviceRunning = true
-        Log.i(TAG, "LogDaemonService created")
-        resumeIfUsbPresent()
-        startHelperWatchdog()
+        val myUser = UserHandle.getUserId(Process.myUid())
+        Log.i(TAG, "LogDaemonService created (Logv3, user=$myUser)")
+
+        // Only user 0 manages USB hint and launches the native helper.
+        // The helper is a single native process; user 0 owns it.
+        if (myUser == 0) {
+            val usbHint = findUsbHint()
+            if (usbHint != null) writeHintFile(usbHint)
+            if (!isHelperAlive()) launchHelper(usbHint)
+        }
+
+        scope.launch { captureLoop() }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val action = intent?.action
-        Log.i(TAG, "onStartCommand action=$action")
-
-        when (action) {
-            UsbManager.ACTION_USB_DEVICE_ATTACHED,
-            Intent.ACTION_MEDIA_MOUNTED -> handleUsbAttached()
-
-            UsbManager.ACTION_USB_DEVICE_DETACHED,
-            Intent.ACTION_MEDIA_UNMOUNTED,
-            Intent.ACTION_MEDIA_EJECT,
-            Intent.ACTION_MEDIA_REMOVED -> handleUsbDetached()
-
-            null -> Log.i(TAG, "Service start (no action) — idle")
-            else -> Log.i(TAG, "Ignoring action: $action")
+        // USB mount events are only relevant in user 0 — MEDIA_MOUNTED fires there.
+        if (intent?.action == Intent.ACTION_MEDIA_MOUNTED &&
+            UserHandle.getUserId(Process.myUid()) == 0) {
+            val usbPath = usbPathFromIntent(intent) ?: findUsbHint()
+            if (usbPath != null) {
+                Log.i(TAG, "USB mounted: $usbPath — updating hint file")
+                writeHintFile(usbPath)
+                if (!isHelperAlive()) {
+                    Log.i(TAG, "Helper not running, launching now")
+                    launchHelper(usbPath)
+                }
+            } else {
+                Log.w(TAG, "MEDIA_MOUNTED but no USB with log.sinfo found (data=${intent.data})")
+            }
         }
-
         return START_STICKY
     }
 
-    private fun resumeIfUsbPresent() {
-        daemonScope.launch {
-            val root = UsbMountLocator.findUsbWithConfig(this@LogDaemonService) ?: return@launch
-            Log.i(TAG, "USB already mounted at ${root.absolutePath} on service start")
-            ensureHelperRunning(root)
+    override fun onDestroy() {
+        super.onDestroy()
+        scope.cancel()
+        Log.i(TAG, "LogDaemonService destroyed")
+    }
+
+    // ── capture loop ──────────────────────────────────────────────────────────
+
+    private suspend fun captureLoop() {
+        val myUser = UserHandle.getUserId(Process.myUid())
+
+        // SecureFolder and Work Profiles run as user ≥ 2. Logcat in those users
+        // is isolated to their own processes — not useful for our use case.
+        // User 0 (owner) and user 1 (secondary user profile) are the targets.
+        if (myUser >= 2) {
+            Log.i(TAG, "captureLoop: user=$myUser is SecureFolder/Work Profile, skipping capture")
+            return
+        }
+        Log.i(TAG, "captureLoop: user=$myUser starting")
+
+        while (true) {
+            try {
+                Log.i(TAG, "captureLoop: waiting for USB")
+                val usbPath = waitForUsb()
+                Log.i(TAG, "captureLoop: USB at $usbPath")
+
+                val packages = parseLogSinfo(usbPath)
+                if (packages.isNullOrEmpty()) {
+                    Log.w(TAG, "captureLoop: no packages in log.sinfo, retry in 10s")
+                    delay(10_000)
+                    continue
+                }
+                Log.i(TAG, "captureLoop: packages=${packages.joinToString()}")
+
+                val socket = connectToHelper()
+                if (socket == null) {
+                    Log.w(TAG, "captureLoop: could not connect to helper, retry in 5s")
+                    delay(5_000)
+                    continue
+                }
+
+                try {
+                    streamLogcat(packages, socket)
+                } finally {
+                    runCatching { socket.close() }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "captureLoop: error, restarting in 5s", e)
+                delay(5_000)
+            }
         }
     }
 
-    private fun handleUsbAttached() {
-        daemonScope.launch {
-            var usbRoot: File? = null
-            repeat(MOUNT_POLL_ATTEMPTS) { attempt ->
-                usbRoot = UsbMountLocator.findUsbWithConfig(this@LogDaemonService)
-                if (usbRoot != null) return@repeat
-                Log.i(TAG, "Waiting for USB mount... attempt ${attempt + 1}")
-                delay(MOUNT_POLL_INTERVAL_MS)
-            }
-
-            val root = usbRoot ?: run {
-                Log.i(TAG, "No USB volume with log.sinfo found")
-                return@launch
-            }
-
-            // Give a helper that is dying (write-failed on USB unmount during profile
-            // switch) time to finish its cleanup and remove the PID file, so
-            // isHelperAlive() returns the correct result.
-            delay(HELPER_DEATH_GRACE_MS)
-            ensureHelperRunning(root)
+    // Poll findUsbHint() every 3 s until a valid USB path is found.
+    private suspend fun waitForUsb(): String {
+        while (true) {
+            val path = findUsbHint()
+            if (path != null) return path
+            delay(3_000)
         }
     }
 
-    private fun startHelperWatchdog() {
-        daemonScope.launch {
-            while (true) {
-                delay(WATCHDOG_INTERVAL_MS)
-                val path = currentUsbPath ?: continue
-                if (!isHelperAlive(path)) {
-                    Log.i(TAG, "Watchdog: helper dead, relaunching")
-                    val root = UsbMountLocator.findUsbWithConfig(this@LogDaemonService)
-                        ?: continue
-                    ensureHelperRunning(root)
+    // Read the [packages] section from log.sinfo on the given USB path.
+    private fun parseLogSinfo(usbPath: String): List<String>? {
+        val configFile = File(usbPath, "log.sinfo")
+        if (!configFile.canRead()) {
+            Log.w(TAG, "Cannot read log.sinfo at $usbPath")
+            return null
+        }
+        val packages = mutableListOf<String>()
+        var inPackages = false
+        configFile.forEachLine { rawLine ->
+            val line = rawLine.trim()
+            if (line.isEmpty() || line.startsWith('#') || line.startsWith(';')) return@forEachLine
+            if (line.startsWith('[')) {
+                inPackages = (line == "[packages]")
+                return@forEachLine
+            }
+            if (inPackages) packages.add(line)
+        }
+        return packages
+    }
+
+    // Connect to the helper's abstract Unix socket @logdaemon.
+    // Only user 0 relaunches the helper; user 1 waits for it to appear.
+    // Returns null after 5 attempts.
+    private suspend fun connectToHelper(): LocalSocket? {
+        val myUser = UserHandle.getUserId(Process.myUid())
+        repeat(5) { attempt ->
+            if (!isHelperAlive()) {
+                if (myUser == 0) {
+                    val hint = findUsbHint()
+                    Log.i(TAG, "Helper not alive, launching (attempt ${attempt + 1})")
+                    launchHelper(hint)
+                    delay(800)
+                } else {
+                    Log.i(TAG, "Helper not alive yet (user=$myUser, attempt ${attempt + 1}), waiting...")
+                    delay(2_000)
                 }
             }
+            try {
+                val socket = LocalSocket()
+                socket.connect(
+                    LocalSocketAddress(SOCKET_NAME, LocalSocketAddress.Namespace.ABSTRACT)
+                )
+                Log.i(TAG, "Connected to helper @$SOCKET_NAME")
+                return socket
+            } catch (e: Exception) {
+                Log.w(TAG, "connect attempt ${attempt + 1}: ${e.message}")
+                delay(2_000)
+            }
         }
+        return null
     }
 
-    private fun ensureHelperRunning(usbRoot: File) {
-        val path = usbRoot.absolutePath
+    // Spawn logcat, scan PIDs, and stream matching lines to the helper socket.
+    // Runs until logcat exits, the socket write fails, or the coroutine is cancelled.
+    private suspend fun streamLogcat(packages: List<String>, socket: LocalSocket) {
+        val pidMap = mutableMapOf<Int, String>()
+        rescanPids(packages, pidMap)
 
-        if (isHelperAlive(path)) {
-            Log.i(TAG, "Helper already running for $path — nothing to do")
-            currentUsbPath = path
-            return
-        }
+        val writer = OutputStreamWriter(socket.outputStream, Charsets.UTF_8)
 
-        launchHelper(path)
-        currentUsbPath = path
-    }
-
-    private fun launchHelper(usbPath: String) {
-        val helperFile = File(applicationInfo.nativeLibraryDir, HELPER_LIB_NAME)
-        if (!helperFile.exists() || !helperFile.canExecute()) {
-            Log.e(TAG, "Native helper not present or not executable at ${helperFile.absolutePath}")
-            return
+        // Run logcat as root so logd sends entries from ALL user profiles.
+        // Root UID (0) is always a privileged reader in logd — no per-user filter.
+        // Falls back to direct logcat if su is unavailable.
+        val proc = if (File("/system/bin/su").exists() || File("/sbin/su").exists()) {
+            Log.i(TAG, "Spawning logcat via su (root — all-user logs)")
+            ProcessBuilder("su", "-c", "/system/bin/logcat -v threadtime *:V")
+                .redirectErrorStream(false)
+                .start()
+        } else {
+            Log.w(TAG, "su not found, spawning logcat as self (owner-only logs)")
+            ProcessBuilder("/system/bin/logcat", "-v", "threadtime", "*:V")
+                .redirectErrorStream(false)
+                .start()
         }
 
         try {
-            // The helper double-forks and setsid()'s before doing any work,
-            // so this ProcessBuilder.start() returns almost immediately and
-            // the launched child (the "first parent") exits. The grandchild
-            // is reparented to init and outlives this service.
-            val proc = ProcessBuilder(helperFile.absolutePath, usbPath)
+            val reader = proc.inputStream.bufferedReader(Charsets.UTF_8)
+            var lastRescan = System.currentTimeMillis()
+            var linesStreamed = 0L
+
+            while (true) {
+                val line = withContext(Dispatchers.IO) { reader.readLine() } ?: break
+
+                val now = System.currentTimeMillis()
+                if (now - lastRescan >= PID_RESCAN_INTERVAL_MS) {
+                    rescanPids(packages, pidMap)
+                    lastRescan = now
+                }
+
+                val pid = extractPid(line) ?: continue
+                val pkg = pidMap[pid] ?: continue
+
+                try {
+                    writer.write("$pkg\t$line\n")
+                    writer.flush()
+                    linesStreamed++
+                } catch (e: Exception) {
+                    Log.w(TAG, "Socket write failed after $linesStreamed lines: ${e.message}")
+                    break
+                }
+            }
+            Log.i(TAG, "streamLogcat ended after $linesStreamed lines")
+        } finally {
+            proc.destroy()
+        }
+    }
+
+    // Scan /proc to build a pid→package map for the given package names.
+    private fun rescanPids(packages: List<String>, pidMap: MutableMap<Int, String>) {
+        pidMap.clear()
+        File("/proc").listFiles { f -> f.isDirectory && f.name.toIntOrNull() != null }
+            ?.forEach { dir ->
+                val pid = dir.name.toInt()
+                try {
+                    val bytes = File(dir, "cmdline").readBytes()
+                    val nullIdx = bytes.indexOfFirst { it == 0.toByte() }
+                    val cmdline = if (nullIdx >= 0) bytes.copyOf(nullIdx).toString(Charsets.UTF_8)
+                                  else bytes.toString(Charsets.UTF_8)
+                    // cmdline may be "com.example.app" or "com.example.app:subproc"
+                    val pkgName = cmdline.split(':').first().trim()
+                    if (pkgName in packages) {
+                        pidMap[pid] = pkgName
+                    }
+                } catch (_: Exception) {}
+            }
+    }
+
+    // Extract PID from a logcat threadtime line:
+    //   MM-DD HH:MM:SS.mmm  PID  TID LEVEL TAG: MSG
+    private fun extractPid(line: String): Int? {
+        val parts = line.trimStart().split(Regex("\\s+"))
+        return if (parts.size >= 3) parts[2].toIntOrNull() else null
+    }
+
+    // ── USB / hint helpers ────────────────────────────────────────────────────
+
+    private fun isHelperAlive(): Boolean {
+        return File("/proc").listFiles { f -> f.isDirectory && f.name.toIntOrNull() != null }
+            ?.any { dir ->
+                try {
+                    File(dir, "cmdline").readBytes()
+                        .toString(Charsets.UTF_8)
+                        .contains(HELPER_LIB_NAME)
+                } catch (_: Exception) { false }
+            } ?: false
+    }
+
+    private fun findUsbHint(): String? {
+        val volumes = File("/storage").listFiles()
+            ?.filter { it.isDirectory && it.name != "self" && it.name != "emulated" }
+            ?: emptyList()
+        Log.d(TAG, "Scanning /storage/ — ${volumes.size} volume(s): ${volumes.joinToString { it.name }}")
+        val match = volumes.firstOrNull { File(it, "log.sinfo").canRead() }
+        if (match == null) {
+            Log.i(TAG, "No volume with log.sinfo found under /storage/")
+            return null
+        }
+        Log.i(TAG, "log.sinfo found on volume ${match.name}, resolving write path...")
+        return resolveWritablePath(match.name)
+    }
+
+    private fun resolveWritablePath(uuid: String): String? {
+        val mediaRw = File("/mnt/media_rw", uuid)
+        if (File(mediaRw, "log.sinfo").canRead()) {
+            Log.i(TAG, "Write path: ${mediaRw.absolutePath} [raw vold mount]")
+            return mediaRw.absolutePath
+        }
+        Log.i(TAG, "/mnt/media_rw/$uuid not accessible, trying /storage/$uuid")
+        val storage = File("/storage", uuid)
+        if (File(storage, "log.sinfo").canRead()) {
+            Log.i(TAG, "Write path: ${storage.absolutePath} [FUSE overlay]")
+            return storage.absolutePath
+        }
+        Log.e(TAG, "Neither /mnt/media_rw/$uuid nor /storage/$uuid accessible")
+        return null
+    }
+
+    private fun usbPathFromIntent(intent: Intent): String? {
+        val uuid = intent.data?.path?.let { File(it).name }
+            ?.takeIf { it.isNotEmpty() } ?: run {
+            Log.w(TAG, "MEDIA_MOUNTED intent has no data URI")
+            return null
+        }
+        Log.i(TAG, "MEDIA_MOUNTED intent uuid=$uuid, resolving write path...")
+        return resolveWritablePath(uuid)
+    }
+
+    private fun writeHintFile(usbPath: String) {
+        try {
+            hintFile().writeText(usbPath)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to write hint file", e)
+        }
+    }
+
+    private fun hintFile(): File = File(filesDir, HINT_FILENAME)
+
+    private fun launchHelper(usbHint: String?) {
+        val helperFile = File(applicationInfo.nativeLibraryDir, HELPER_LIB_NAME)
+        if (!helperFile.exists() || !helperFile.canExecute()) {
+            Log.e(TAG, "Helper not found or not executable: ${helperFile.absolutePath}")
+            return
+        }
+        val cmd = mutableListOf(helperFile.absolutePath)
+        if (usbHint != null) {
+            cmd.add(usbHint)
+            Log.i(TAG, "Passing USB hint to helper: $usbHint")
+        }
+        try {
+            ProcessBuilder(cmd)
+                .apply { environment()[ENV_HINT_FILE] = hintFile().absolutePath }
                 .redirectErrorStream(true)
                 .start()
-            // Don't wait — helper detaches itself. Just confirm spawn succeeded.
-            Log.i(TAG, "Launched helper launcher (will detach) for $usbPath, launcher pid=${proc.pid()}")
+            Log.i(TAG, "Helper launched")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to launch helper", e)
         }
     }
 
-    private fun isHelperAlive(usbPath: String): Boolean {
-        val pidFile = File(usbPath, ".logdaemon.pid")
-        if (!pidFile.exists()) return false
-        val pid = pidFile.readText().trim().toIntOrNull() ?: return false
-        return File("/proc/$pid").exists()
-    }
-
-    private fun handleUsbDetached() {
-        // The helper polls for USB presence and exits on its own. We just
-        // clear our tracking state — no need to signal the helper, and on
-        // a profile-switch false eject we want it to keep running anyway.
-        Log.i(TAG, "USB detach event — helper will self-terminate if USB is really gone")
-        currentUsbPath = null
-    }
-
-    override fun onDestroy() {
-        LogDaemonApp.serviceRunning = false
-        Log.i(TAG, "LogDaemonService destroyed (helper continues independently)")
-        super.onDestroy()
-    }
-
     override fun onBind(intent: Intent?): IBinder? = null
 
     companion object {
-        private const val TAG = "LogDaemon.Service"
-        private const val MOUNT_POLL_ATTEMPTS = 10
-        private const val MOUNT_POLL_INTERVAL_MS = 500L
-        private const val HELPER_LIB_NAME = "liblogdaemon_helper.so"
-        private const val HELPER_DEATH_GRACE_MS = 3_000L
-        private const val WATCHDOG_INTERVAL_MS = 30_000L
+        private const val TAG                  = "LogDaemon.Service"
+        private const val HELPER_LIB_NAME      = "liblogdaemon_helper.so"
+        private const val HINT_FILENAME        = "usb_hint"
+        private const val SOCKET_NAME          = "logdaemon"
+        private const val PID_RESCAN_INTERVAL_MS = 2_000L
+        const val         ENV_HINT_FILE        = "LOGDAEMON_HINT_FILE"
     }
 }
