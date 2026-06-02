@@ -1,17 +1,17 @@
-// LogDaemon native helper — Logv4 (init.rc daemon, internal storage)
+// LogDaemon native helper — Logv4 (init.rc daemon)
 //
 // Deployed as /system/bin/logdaemon, started by init as user=root.
 // No daemonize(), no instance guard — init manages both.
 //
-// As root:
-//   - logcat receives log entries from ALL Android user profiles
-//   - /proc scan finds PIDs for all users simultaneously
-//   - writes to /data/media/0/LogDaemon/ (owner internal storage)
-//     → visible in file manager as "Internal Storage/LogDaemon/"
-//     → never affected by profile switches or vold USB management
-//
-// Config file: /data/media/0/LogDaemon/log.sinfo
-// Output:      /data/media/0/LogDaemon/logs/<timestamp>/
+// Flow:
+//   1. Scan /mnt/media_rw/ for a USB drive containing log.sinfo
+//   2. Read package list from log.sinfo (file closed immediately after)
+//   3. Write logs to /data/media/0/LogDaemon/logs/<timestamp>/
+//      → internal storage, never affected by profile switches or vold
+//      → visible in file manager as "Internal Storage/LogDaemon/"
+//   4. Capture runs indefinitely — USB removal does NOT stop capture
+//      (no open handles on USB during capture)
+//   5. On daemon restart: repeat from step 1
 
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -38,10 +38,10 @@
 #define MAX_PIDS_PER_PKG          8
 #define MAX_LINE               8192
 #define PID_RESCAN_INTERVAL_SEC   2
-#define CONFIG_POLL_SEC           5
+#define USB_SCAN_INTERVAL_SEC     5
 
+// Logs always go to owner internal storage regardless of USB state.
 #define OUTPUT_ROOT "/data/media/0/LogDaemon"
-#define CONFIG_FILE "/data/media/0/LogDaemon/log.sinfo"
 #define RESUME_FILE "/data/media/0/LogDaemon/.last_ts"
 
 typedef struct {
@@ -55,7 +55,8 @@ typedef struct {
 } Package;
 
 typedef struct {
-    char    session_dir[512];
+    char    usb_root[512];    // path of USB drive containing log.sinfo
+    char    session_dir[512]; // output dir on internal storage
     Package packages[MAX_PACKAGES];
     int     package_count;
     char    min_level;
@@ -75,6 +76,34 @@ static void sigterm_handler(int sig) {
         kill(g_state.logcat_pid, SIGTERM);
 }
 
+// ── USB discovery ─────────────────────────────────────────────────────────────
+
+// Scan /mnt/media_rw/ for a drive containing log.sinfo.
+// As root we can opendir /mnt/media_rw/ directly (raw FAT, no FUSE).
+static int find_usb(void) {
+    DIR *d = opendir("/mnt/media_rw");
+    if (!d) {
+        LOGD("opendir /mnt/media_rw: %s", strerror(errno));
+        return 0;
+    }
+
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        if (e->d_name[0] == '.') continue;
+        char cfg[600];
+        snprintf(cfg, sizeof(cfg), "/mnt/media_rw/%s/log.sinfo", e->d_name);
+        if (access(cfg, R_OK) == 0) {
+            snprintf(g_state.usb_root, sizeof(g_state.usb_root),
+                     "/mnt/media_rw/%s", e->d_name);
+            LOGI("USB found: %s", g_state.usb_root);
+            closedir(d);
+            return 1;
+        }
+    }
+    closedir(d);
+    return 0;
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 static char *trim(char *s) {
@@ -85,9 +114,14 @@ static char *trim(char *s) {
     return s;
 }
 
+// Read config from USB log.sinfo. File is opened and closed here —
+// no USB file handle remains open after this call.
 static int parse_config(void) {
-    FILE *f = fopen(CONFIG_FILE, "r");
-    if (!f) { LOGE("Cannot open config: %s", CONFIG_FILE); return -1; }
+    char path[600];
+    snprintf(path, sizeof(path), "%s/log.sinfo", g_state.usb_root);
+
+    FILE *f = fopen(path, "r");
+    if (!f) { LOGE("Cannot open config: %s", path); return -1; }
 
     char line[1024];
     int in_packages = 0, in_options = 0;
@@ -108,11 +142,14 @@ static int parse_config(void) {
         if (in_options && strncmp(p, "min_level=", 10) == 0)
             g_state.min_level = (char)toupper((unsigned char)p[10]);
     }
-    fclose(f);
-    LOGI("Config: %d package(s), min_level=%c", g_state.package_count, g_state.min_level);
+    fclose(f);  // USB handle closed here — no further USB dependency
+
+    LOGI("Config: %d package(s), min_level=%c (from %s)",
+         g_state.package_count, g_state.min_level, g_state.usb_root);
     return 0;
 }
 
+// Output goes to internal storage, not USB.
 static int create_session_dir(void) {
     time_t now = time(NULL);
     struct tm tm;
@@ -131,7 +168,7 @@ static int create_session_dir(void) {
         LOGE("mkdir %s: %s", g_state.session_dir, strerror(errno));
         return -1;
     }
-    LOGI("Session: %s", g_state.session_dir);
+    LOGI("Session dir: %s", g_state.session_dir);
     return 0;
 }
 
@@ -173,6 +210,7 @@ static void reset_state(void) {
         close(g_state.logcat_fd);
         g_state.logcat_fd = -1;
     }
+    g_state.usb_root[0]    = 0;
     g_state.session_dir[0] = 0;
     g_state.package_count  = 0;
     for (int i = 0; i < MAX_PACKAGES; i++)
@@ -231,7 +269,7 @@ static int pid_to_package(int pid) {
 
 // Spawn logcat as root. logd sends ALL users' log entries to root readers.
 // Reads RESUME_FILE and passes -T <timestamp> if present so logd replays
-// any buffered lines since the last checkpoint — no logs lost on restart.
+// any buffered lines since the last checkpoint.
 static int spawn_logcat(void) {
     char resume_ts[64] = {0};
     FILE *rf = fopen(RESUME_FILE, "r");
@@ -366,8 +404,9 @@ static void write_session_meta(time_t start_time) {
     struct tm tm;
     localtime_r(&start_time, &tm);
     strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &tm);
-    fprintf(f, "session_start=%s\nlogv4=1\nuid=%d\nhelper_pid=%d\nmin_level=%c\n",
-            ts, getuid(), getpid(), g_state.min_level);
+    fprintf(f, "session_start=%s\nlogv4=1\nuid=%d\nhelper_pid=%d\nmin_level=%c\n"
+               "usb_source=%s\n",
+            ts, getuid(), getpid(), g_state.min_level, g_state.usb_root);
     fprintf(f, "packages:\n");
     for (int i = 0; i < g_state.package_count; i++)
         fprintf(f, "  - %s\n", g_state.packages[i].name);
@@ -393,6 +432,8 @@ static void write_summary(time_t start_t, time_t end_t) {
 
 // ── capture session ───────────────────────────────────────────────────────────
 
+// Runs until SIGTERM or a write error. No USB handles open during this call —
+// capture continues regardless of USB state (profile switches, vold, unplug).
 static void run_session(void) {
     time_t session_start = time(NULL);
     write_session_meta(session_start);
@@ -419,7 +460,7 @@ static void run_session(void) {
             int idx = pid_to_package(e.pid);
             if (idx >= 0) {
                 if (write_entry(idx, &e, line) < 0) {
-                    LOGE("Write failed: %s", strerror(errno));
+                    LOGE("Write error: %s", strerror(errno));
                     break;
                 }
                 lines_matched++;
@@ -454,28 +495,34 @@ int main(void) {
     umask(0);
 
     LOGI("logdaemon started pid=%d uid=%d (Logv4)", getpid(), (int)getuid());
-    LOGI("Output: %s", OUTPUT_ROOT);
 
     mkdir(OUTPUT_ROOT, 0775);
 
     while (g_running) {
-        if (access(CONFIG_FILE, R_OK) != 0) {
-            LOGD("Waiting for config at %s", CONFIG_FILE);
-            sleep(CONFIG_POLL_SEC);
+        // Wait for USB drive with log.sinfo
+        if (!find_usb()) {
+            LOGD("No USB with log.sinfo — retrying in %ds", USB_SCAN_INTERVAL_SEC);
+            sleep(USB_SCAN_INTERVAL_SEC);
             continue;
         }
 
+        // Read config from USB. After this call, no USB handles remain open.
         if (parse_config() < 0 || g_state.package_count == 0) {
-            LOGE("Config invalid or no packages — retrying in %ds", CONFIG_POLL_SEC);
+            LOGE("Config invalid or no packages");
             reset_state();
-            sleep(CONFIG_POLL_SEC);
+            sleep(USB_SCAN_INTERVAL_SEC);
             continue;
         }
 
-        if (create_session_dir() < 0) { reset_state(); sleep(CONFIG_POLL_SEC); continue; }
-        if (open_writers()       < 0) { reset_state(); sleep(CONFIG_POLL_SEC); continue; }
+        // Create output on internal storage
+        if (create_session_dir() < 0) { reset_state(); sleep(USB_SCAN_INTERVAL_SEC); continue; }
+        if (open_writers()       < 0) { reset_state(); sleep(USB_SCAN_INTERVAL_SEC); continue; }
 
+        LOGI("Capture started — writing to internal storage (USB may be removed safely)");
+
+        // Capture runs indefinitely. USB removal/profile switches do not stop this.
         run_session();
+
         reset_state();
     }
 
