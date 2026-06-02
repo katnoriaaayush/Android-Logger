@@ -149,6 +149,23 @@ static int parse_config(void) {
     return 0;
 }
 
+// mkdir -p equivalent: creates every component of path, ignores EEXIST.
+static void makedirs(const char *path) {
+    char tmp[512];
+    strncpy(tmp, path, sizeof(tmp) - 1);
+    tmp[sizeof(tmp) - 1] = 0;
+    for (char *p = tmp + 1; *p; p++) {
+        if (*p == '/') {
+            *p = 0;
+            if (mkdir(tmp, 0775) < 0 && errno != EEXIST)
+                LOGD("makedirs: mkdir %s: %s", tmp, strerror(errno));
+            *p = '/';
+        }
+    }
+    if (mkdir(tmp, 0775) < 0 && errno != EEXIST)
+        LOGD("makedirs: mkdir %s: %s", tmp, strerror(errno));
+}
+
 // Output goes to internal storage, not USB.
 static int create_session_dir(void) {
     time_t now = time(NULL);
@@ -157,15 +174,22 @@ static int create_session_dir(void) {
     char ts[64];
     strftime(ts, sizeof(ts), "%Y-%m-%d_%H-%M-%S", &tm);
 
-    mkdir(OUTPUT_ROOT, 0775);
+    // Build logs/ directory first, creating all parent components.
     char logs_dir[512];
     snprintf(logs_dir, sizeof(logs_dir), "%s/logs", OUTPUT_ROOT);
-    mkdir(logs_dir, 0775);
+    makedirs(logs_dir);
+
+    // Verify logs_dir is actually a directory before proceeding.
+    struct stat st;
+    if (stat(logs_dir, &st) < 0 || !S_ISDIR(st.st_mode)) {
+        LOGE("logs dir not usable: %s (%s)", logs_dir, strerror(errno));
+        return -1;
+    }
 
     snprintf(g_state.session_dir, sizeof(g_state.session_dir),
-             "%s/logs/%s", OUTPUT_ROOT, ts);
+             "%s/%s", logs_dir, ts);
     if (mkdir(g_state.session_dir, 0775) < 0) {
-        LOGE("mkdir %s: %s", g_state.session_dir, strerror(errno));
+        LOGE("mkdir session %s: %s", g_state.session_dir, strerror(errno));
         return -1;
     }
     LOGI("Session dir: %s", g_state.session_dir);
@@ -496,7 +520,8 @@ int main(void) {
 
     LOGI("logdaemon started pid=%d uid=%d (Logv4)", getpid(), (int)getuid());
 
-    mkdir(OUTPUT_ROOT, 0775);
+    makedirs(OUTPUT_ROOT);
+    LOGI("Output root: %s", OUTPUT_ROOT);
 
     while (g_running) {
         // Wait for USB drive with log.sinfo
