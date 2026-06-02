@@ -1,17 +1,17 @@
-// LogDaemon native helper — Logv4 (init.rc daemon)
+// LogDaemon native helper — Logv4 (init.rc daemon, internal storage)
 //
 // Deployed as /system/bin/logdaemon, started by init as user=root.
 // No daemonize(), no instance guard — init manages both.
 //
 // As root:
-//   - /mnt/media_rw/<uuid>/ is directly accessible (raw FAT, no FUSE)
 //   - logcat receives log entries from ALL Android user profiles
 //   - /proc scan finds PIDs for all users simultaneously
+//   - writes to /data/media/0/LogDaemon/ (owner internal storage)
+//     → visible in file manager as "Internal Storage/LogDaemon/"
+//     → never affected by profile switches or vold USB management
 //
-// Flow:
-//   scan /mnt/media_rw/ for log.sinfo -> parse config -> create session dir
-//   -> spawn logcat -> filter by PID/package -> write to USB
-//   -> on USB gone: reset, rescan, repeat
+// Config file: /data/media/0/LogDaemon/log.sinfo
+// Output:      /data/media/0/LogDaemon/logs/<timestamp>/
 
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -38,12 +38,11 @@
 #define MAX_PIDS_PER_PKG          8
 #define MAX_LINE               8192
 #define PID_RESCAN_INTERVAL_SEC   2
-#define USB_CHECK_INTERVAL_SEC    5
-#define USB_SCAN_INTERVAL_SEC     5
+#define CONFIG_POLL_SEC           5
 
-// Survives daemon restarts (internal storage, not USB).
-// Holds last-written logcat timestamp so -T can replay the gap.
-#define RESUME_FILE "/data/local/tmp/.logdaemon_ts"
+#define OUTPUT_ROOT "/data/media/0/LogDaemon"
+#define CONFIG_FILE "/data/media/0/LogDaemon/log.sinfo"
+#define RESUME_FILE "/data/media/0/LogDaemon/.last_ts"
 
 typedef struct {
     char name[128];
@@ -56,9 +55,7 @@ typedef struct {
 } Package;
 
 typedef struct {
-    char    usb_root[512];
-    char    session_dir[1024];
-    char    pid_file[1024];
+    char    session_dir[512];
     Package packages[MAX_PACKAGES];
     int     package_count;
     char    min_level;
@@ -72,61 +69,10 @@ static volatile int g_running = 1;
 static void sigterm_handler(int sig) {
     (void)sig;
     g_running = 0;
-    // Kill logcat child immediately so fgets() gets EOF and the
-    // capture loop exits without waiting for the next log line.
+    // Kill logcat child immediately so fgets() gets EOF without waiting
+    // for the next log line.
     if (g_state.logcat_pid > 0)
         kill(g_state.logcat_pid, SIGTERM);
-}
-
-// ── USB discovery ─────────────────────────────────────────────────────────────
-
-// Running as root: scan /mnt/media_rw/ directly (raw FAT, no FUSE).
-// Fall back to /storage/ if /mnt/media_rw/ is unavailable.
-static int find_usb(void) {
-
-    // Primary: /mnt/media_rw/ — root can list this directly
-    DIR *d = opendir("/mnt/media_rw");
-    if (d) {
-        struct dirent *e;
-        while ((e = readdir(d))) {
-            if (e->d_name[0] == '.') continue;
-            char cfg[768];
-            snprintf(cfg, sizeof(cfg), "/mnt/media_rw/%s/log.sinfo", e->d_name);
-            if (access(cfg, R_OK) == 0) {
-                snprintf(g_state.usb_root, sizeof(g_state.usb_root),
-                         "/mnt/media_rw/%s", e->d_name);
-                LOGI("USB: %s [raw vold mount]", g_state.usb_root);
-                closedir(d);
-                return 1;
-            }
-        }
-        closedir(d);
-    } else {
-        LOGD("opendir /mnt/media_rw: %s", strerror(errno));
-    }
-
-    // Fallback: /storage/ FUSE overlay
-    DIR *ds = opendir("/storage");
-    if (ds) {
-        struct dirent *e;
-        while ((e = readdir(ds))) {
-            if (e->d_name[0] == '.') continue;
-            if (strcmp(e->d_name, "self")     == 0) continue;
-            if (strcmp(e->d_name, "emulated") == 0) continue;
-            char cfg[768];
-            snprintf(cfg, sizeof(cfg), "/storage/%s/log.sinfo", e->d_name);
-            if (access(cfg, R_OK) == 0) {
-                snprintf(g_state.usb_root, sizeof(g_state.usb_root),
-                         "/storage/%s", e->d_name);
-                LOGI("USB: %s [FUSE overlay fallback]", g_state.usb_root);
-                closedir(ds);
-                return 1;
-            }
-        }
-        closedir(ds);
-    }
-
-    return 0;
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -140,11 +86,8 @@ static char *trim(char *s) {
 }
 
 static int parse_config(void) {
-    char path[1024];
-    snprintf(path, sizeof(path), "%s/log.sinfo", g_state.usb_root);
-
-    FILE *f = fopen(path, "r");
-    if (!f) { LOGE("Cannot open config: %s", path); return -1; }
+    FILE *f = fopen(CONFIG_FILE, "r");
+    if (!f) { LOGE("Cannot open config: %s", CONFIG_FILE); return -1; }
 
     char line[1024];
     int in_packages = 0, in_options = 0;
@@ -177,12 +120,13 @@ static int create_session_dir(void) {
     char ts[64];
     strftime(ts, sizeof(ts), "%Y-%m-%d_%H-%M-%S", &tm);
 
-    char logs_dir[1024];
-    snprintf(logs_dir, sizeof(logs_dir), "%s/logs", g_state.usb_root);
+    mkdir(OUTPUT_ROOT, 0775);
+    char logs_dir[512];
+    snprintf(logs_dir, sizeof(logs_dir), "%s/logs", OUTPUT_ROOT);
     mkdir(logs_dir, 0775);
 
     snprintf(g_state.session_dir, sizeof(g_state.session_dir),
-             "%s/logs/%s", g_state.usb_root, ts);
+             "%s/logs/%s", OUTPUT_ROOT, ts);
     if (mkdir(g_state.session_dir, 0775) < 0) {
         LOGE("mkdir %s: %s", g_state.session_dir, strerror(errno));
         return -1;
@@ -194,7 +138,7 @@ static int create_session_dir(void) {
 static int open_writers(void) {
     for (int i = 0; i < g_state.package_count; i++) {
         Package *pkg = &g_state.packages[i];
-        char path[1200];
+        char path[600];
 
         snprintf(path, sizeof(path), "%s/%s.log", g_state.session_dir, pkg->name);
         pkg->raw = fopen(path, "w");
@@ -229,9 +173,7 @@ static void reset_state(void) {
         close(g_state.logcat_fd);
         g_state.logcat_fd = -1;
     }
-    g_state.usb_root[0]    = 0;
     g_state.session_dir[0] = 0;
-    g_state.pid_file[0]    = 0;
     g_state.package_count  = 0;
     for (int i = 0; i < MAX_PACKAGES; i++)
         memset(&g_state.packages[i], 0, sizeof(Package));
@@ -288,8 +230,8 @@ static int pid_to_package(int pid) {
 // ── logcat ────────────────────────────────────────────────────────────────────
 
 // Spawn logcat as root. logd sends ALL users' log entries to root readers.
-// On restart after vold SIGTERM, reads RESUME_FILE and passes -T <timestamp>
-// so logd replays buffered lines from the gap — no logs lost.
+// Reads RESUME_FILE and passes -T <timestamp> if present so logd replays
+// any buffered lines since the last checkpoint — no logs lost on restart.
 static int spawn_logcat(void) {
     char resume_ts[64] = {0};
     FILE *rf = fopen(RESUME_FILE, "r");
@@ -407,29 +349,16 @@ static int write_entry(int pkg_idx, const LogEntry *e, const char *raw_line) {
     if ((pkg->total & 0x3F) == 0) {
         fflush(pkg->raw);
         fflush(pkg->tsv);
-        // Checkpoint: if vold kills us, next restart replays from here
         FILE *cf = fopen(RESUME_FILE, "w");
         if (cf) { fprintf(cf, "%s\n", e->raw_ts); fclose(cf); }
     }
     return 0;
 }
 
-static int usb_present(void) {
-    struct stat st;
-    return (g_state.session_dir[0] && stat(g_state.session_dir, &st) == 0);
-}
-
 // ── session metadata ──────────────────────────────────────────────────────────
 
-static void write_pid_file(void) {
-    snprintf(g_state.pid_file, sizeof(g_state.pid_file),
-             "%s/.logdaemon.pid", g_state.usb_root);
-    FILE *f = fopen(g_state.pid_file, "w");
-    if (f) { fprintf(f, "%d\n", getpid()); fclose(f); }
-}
-
 static void write_session_meta(time_t start_time) {
-    char path[1100];
+    char path[600];
     snprintf(path, sizeof(path), "%s/_session.meta", g_state.session_dir);
     FILE *f = fopen(path, "w");
     if (!f) return;
@@ -446,7 +375,7 @@ static void write_session_meta(time_t start_time) {
 }
 
 static void write_summary(time_t start_t, time_t end_t) {
-    char path[1100];
+    char path[600];
     snprintf(path, sizeof(path), "%s/_summary.tsv", g_state.session_dir);
     FILE *f = fopen(path, "w");
     if (!f) return;
@@ -465,7 +394,6 @@ static void write_summary(time_t start_t, time_t end_t) {
 // ── capture session ───────────────────────────────────────────────────────────
 
 static void run_session(void) {
-    write_pid_file();
     time_t session_start = time(NULL);
     write_session_meta(session_start);
     rescan_pids();
@@ -477,8 +405,7 @@ static void run_session(void) {
     g_state.logcat_fd = -1;
 
     char line[MAX_LINE];
-    time_t last_rescan    = time(NULL);
-    time_t last_usb_check = time(NULL);
+    time_t last_rescan = time(NULL);
     long   lines_total = 0, lines_matched = 0;
 
     while (g_running && fgets(line, sizeof(line), logf)) {
@@ -492,7 +419,7 @@ static void run_session(void) {
             int idx = pid_to_package(e.pid);
             if (idx >= 0) {
                 if (write_entry(idx, &e, line) < 0) {
-                    LOGI("Write failed — USB likely removed");
+                    LOGE("Write failed: %s", strerror(errno));
                     break;
                 }
                 lines_matched++;
@@ -503,10 +430,6 @@ static void run_session(void) {
         if (now - last_rescan >= PID_RESCAN_INTERVAL_SEC) {
             rescan_pids();
             last_rescan = now;
-        }
-        if (now - last_usb_check >= USB_CHECK_INTERVAL_SEC) {
-            last_usb_check = now;
-            if (!usb_present()) { LOGI("USB gone"); break; }
         }
     }
 
@@ -520,52 +443,39 @@ static void run_session(void) {
     fclose(logf);
     close_writers();
     write_summary(session_start, time(NULL));
-    if (g_state.pid_file[0]) unlink(g_state.pid_file);
 }
 
 // ── main ─────────────────────────────────────────────────────────────────────
 
-int main(int argc, char **argv) {
-    // init.rc manages process lifetime and single-instance guarantee.
-    // Just set up signals and go.
+int main(void) {
     signal(SIGHUP,  SIG_IGN);
     signal(SIGPIPE, SIG_IGN);
     signal(SIGTERM, sigterm_handler);
     umask(0);
 
     LOGI("logdaemon started pid=%d uid=%d (Logv4)", getpid(), (int)getuid());
+    LOGI("Output: %s", OUTPUT_ROOT);
 
-    // Accept optional argv[1] as a pre-validated USB root path (for manual testing).
-    if (argc >= 2 && argv[1] && argv[1][0]) {
-        char cfg[768];
-        snprintf(cfg, sizeof(cfg), "%s/log.sinfo", argv[1]);
-        if (access(cfg, R_OK) == 0) {
-            strncpy(g_state.usb_root, argv[1], sizeof(g_state.usb_root) - 1);
-            LOGI("USB path from args: %s", g_state.usb_root);
-        }
-    }
+    mkdir(OUTPUT_ROOT, 0775);
 
     while (g_running) {
-        if (g_state.usb_root[0] == '\0' && !find_usb()) {
-            LOGD("No USB with log.sinfo, retrying in %ds", USB_SCAN_INTERVAL_SEC);
-            sleep(USB_SCAN_INTERVAL_SEC);
+        if (access(CONFIG_FILE, R_OK) != 0) {
+            LOGD("Waiting for config at %s", CONFIG_FILE);
+            sleep(CONFIG_POLL_SEC);
             continue;
         }
-
-        LOGI("USB: %s", g_state.usb_root);
 
         if (parse_config() < 0 || g_state.package_count == 0) {
-            LOGE("Config invalid or no packages");
+            LOGE("Config invalid or no packages — retrying in %ds", CONFIG_POLL_SEC);
             reset_state();
-            sleep(USB_SCAN_INTERVAL_SEC);
+            sleep(CONFIG_POLL_SEC);
             continue;
         }
-        if (create_session_dir() < 0) { reset_state(); continue; }
-        if (open_writers()       < 0) { reset_state(); continue; }
+
+        if (create_session_dir() < 0) { reset_state(); sleep(CONFIG_POLL_SEC); continue; }
+        if (open_writers()       < 0) { reset_state(); sleep(CONFIG_POLL_SEC); continue; }
 
         run_session();
-
-        LOGI("Rescanning for USB");
         reset_state();
     }
 

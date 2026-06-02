@@ -165,19 +165,43 @@ adb shell su -c "chown root:root /system/etc/permissions/platform.xml"
 
 ---
 
-## Part 4 — Prepare the USB Drive
+## Part 4 — Create the config file on internal storage
 
-On the USB drive, create the configuration file `log.sinfo`:
+The daemon writes logs to owner internal storage (`/data/media/0/LogDaemon/`),
+which appears as **Internal Storage/LogDaemon/** in the file manager.
+No USB drive is required.
 
-```
-# log.sinfo — LogDaemon configuration
-# One package name per line (lines starting with '#' are comments).
+Create the config file at `/data/media/0/LogDaemon/log.sinfo`:
+
+```bash
+adb shell su -c "mkdir -p /data/media/0/LogDaemon"
+adb shell su -c "cat > /data/media/0/LogDaemon/log.sinfo" << 'EOF'
+[packages]
 com.example.targetapp
 com.other.package
+
+[options]
+min_level=D
+EOF
 ```
 
-The file must be placed at the **root** of the USB drive's FAT partition.
-logdaemon scans `/mnt/media_rw/<uuid>/log.sinfo` on startup.
+Or push a file from the host:
+```bash
+cat > /tmp/log.sinfo << 'EOF'
+[packages]
+com.example.targetapp
+com.other.package
+
+[options]
+min_level=D
+EOF
+adb push /tmp/log.sinfo /sdcard/log.sinfo
+adb shell su -c "cp /sdcard/log.sinfo /data/media/0/LogDaemon/log.sinfo"
+```
+
+The daemon polls for this file every 5 seconds. Once it appears, capture starts.
+To change packages: edit the file — the new config takes effect on the next
+daemon restart (or `stop logdaemon && start logdaemon`).
 
 ---
 
@@ -262,31 +286,19 @@ Common causes:
 - SELinux enforcing — set permissive: `setenforce 0`
 - `/system` remounted read-only after reboot → push failed silently (verify with `ls -la /system/bin/logdaemon`)
 
-### Logs not appearing on USB
+### Logs not appearing in Internal Storage/LogDaemon/
 
 ```bash
-adb shell su -c "ls /mnt/media_rw/"
-# Must show the UUID directory of the mounted USB drive
-adb shell su -c "ls /mnt/media_rw/<uuid>/"
-# Must show log.sinfo
+adb shell su -c "ls /data/media/0/LogDaemon/"
+# Must show log.sinfo and a logs/ directory
+adb shell su -c "ls /data/media/0/LogDaemon/logs/"
+# Must show timestamped session directories
 ```
 
 Common causes:
-- `log.sinfo` missing or misspelled — check exact filename
-- USB drive not mounted yet — attach USB after boot, then `start logdaemon`
+- `log.sinfo` missing — create it (see Part 4)
 - Package names in `log.sinfo` do not match installed packages — verify with `adb shell pm list packages`
-
-### SELinux blocking `/mnt/media_rw/`
-
-```bash
-adb logcat | grep "avc: denied"
-# If you see denials for logdaemon accessing /mnt/media_rw/:
-adb shell su -c "setenforce 0"
-```
-
-For a permanent SELinux fix without permissive mode, a custom `logdaemon.te`
-policy file and corresponding device-specific `file_contexts` entry would be
-needed (out of scope for this document).
+- `/data/media/0/` not yet mounted — daemon starts `class late_start`, should be available
 
 ---
 
@@ -296,5 +308,11 @@ needed (out of scope for this document).
 /system/bin/logdaemon                                    ← new binary
 /system/etc/init/logdaemon.rc                            ← new init service
 /system/etc/permissions/privapp-permissions-logdaemon.xml← new (if APK installed)
-/system/etc/permissions/platform.xml                     ← edit (add media_rw GID, optional)
 ```
+
+Log output location (not a firmware file — created at runtime):
+```
+/data/media/0/LogDaemon/log.sinfo       ← config (create before first run)
+/data/media/0/LogDaemon/logs/<ts>/      ← captured logs per session
+```
+Visible in file manager as: **Internal Storage → LogDaemon → logs**
