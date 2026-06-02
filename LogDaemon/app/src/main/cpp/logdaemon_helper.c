@@ -473,7 +473,13 @@ static void run_session(void) {
     char line[MAX_LINE];
     time_t last_rescan    = time(NULL);
     time_t last_usb_check = time(NULL);
+    int    usb_miss       = 0;
     long   lines_total = 0, lines_matched = 0;
+
+    // Require USB absent for 3 consecutive checks (≥15s) before stopping.
+    // A single miss during a profile-switch transition resets on the next
+    // successful check, preventing false stops from transient mount gaps.
+    const int USB_MISS_MAX = 3;
 
     while (g_running && fgets(line, sizeof(line), logf)) {
         size_t l = strlen(line);
@@ -502,8 +508,14 @@ static void run_session(void) {
             last_usb_check = now;
             struct stat st;
             if (stat(g_state.usb_root, &st) < 0 || !S_ISDIR(st.st_mode)) {
-                LOGI("USB ejected — stopping capture");
-                break;
+                usb_miss++;
+                LOGD("USB check: miss %d/%d", usb_miss, USB_MISS_MAX);
+                if (usb_miss >= USB_MISS_MAX) {
+                    LOGI("USB gone (%ds) — stopping capture", usb_miss * USB_CHECK_INTERVAL_SEC);
+                    break;
+                }
+            } else {
+                usb_miss = 0;  // transient gap recovered — keep capturing
             }
         }
     }
