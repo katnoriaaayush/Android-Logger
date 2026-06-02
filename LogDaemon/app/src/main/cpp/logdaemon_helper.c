@@ -39,6 +39,7 @@
 #define MAX_LINE               8192
 #define PID_RESCAN_INTERVAL_SEC   2
 #define USB_SCAN_INTERVAL_SEC     5
+#define USB_CHECK_INTERVAL_SEC    5
 
 // Logs always go to owner internal storage regardless of USB state.
 #define OUTPUT_ROOT "/data/media/0/LogDaemon"
@@ -470,7 +471,8 @@ static void run_session(void) {
     g_state.logcat_fd = -1;
 
     char line[MAX_LINE];
-    time_t last_rescan = time(NULL);
+    time_t last_rescan    = time(NULL);
+    time_t last_usb_check = time(NULL);
     long   lines_total = 0, lines_matched = 0;
 
     while (g_running && fgets(line, sizeof(line), logf)) {
@@ -495,6 +497,14 @@ static void run_session(void) {
         if (now - last_rescan >= PID_RESCAN_INTERVAL_SEC) {
             rescan_pids();
             last_rescan = now;
+        }
+        if (now - last_usb_check >= USB_CHECK_INTERVAL_SEC) {
+            last_usb_check = now;
+            struct stat st;
+            if (stat(g_state.usb_root, &st) < 0 || !S_ISDIR(st.st_mode)) {
+                LOGI("USB ejected — stopping capture");
+                break;
+            }
         }
     }
 
