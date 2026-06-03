@@ -21,5 +21,5 @@ target_compile_options(logdaemon_helper PRIVATE -Wall -Wextra -O2)
 #   app/build/intermediates/cmake/<variant>/obj/<abi>/logdaemon
 # to /system/bin/logdaemon on the target device.
 add_executable(logdaemon logdaemon_helper.c)
-target_link_libraries(logdaemon log)
-target_compile_options(logdaemon PRIVATE -Wall -Wextra -O2 -DLOGV4_DAEMON)
+target_link_libraries(logdaemon log)  # pthread is part of bionic on Android — no -lpthread needed
+target_compile_options(logdaemon PRIVATE -Wall -Wextra -O2)

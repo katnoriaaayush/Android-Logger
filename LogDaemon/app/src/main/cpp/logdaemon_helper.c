@@ -1,17 +1,25 @@
 // LogDaemon native helper — Logv4 (init.rc daemon)
 //
 // Deployed as /system/bin/logdaemon, started by init as user=root.
-// No daemonize(), no instance guard — init manages both.
+//
+// Two-thread design:
+//   Main thread  — reads logcat pipe, filters by PID/package, writes to
+//                  internal storage. Never touches USB during capture.
+//   Sync thread  — every SYNC_INTERVAL_SEC: checks USB presence, streams
+//                  new bytes from internal storage to USB in chunks.
+//                  Sets g_usb_gone and kills logcat child when USB is gone,
+//                  which unblocks the main thread cleanly.
 //
 // Flow:
-//   1. Scan /mnt/media_rw/ for a USB drive containing log.sinfo
-//   2. Read package list from log.sinfo (file closed immediately after)
-//   3. Write logs to /data/media/0/LogDaemon/logs/<timestamp>/
-//      → internal storage, never affected by profile switches or vold
-//      → visible in file manager as "Internal Storage/LogDaemon/"
-//   4. Capture runs indefinitely — USB removal does NOT stop capture
-//      (no open handles on USB during capture)
-//   5. On daemon restart: repeat from step 1
+//   1. Scan /mnt/media_rw/ for USB drive with log.sinfo
+//   2. Read config (file closed immediately — no persistent USB handle)
+//   3. Create session dir on internal storage
+//   4. Spawn sync thread (passes immutable session params)
+//   5. Main thread: logcat → filter → write internal storage (uninterrupted)
+//   6. Sync thread: every 5s sync chunks to USB, check USB still present
+//   7. USB ejected → sync thread sets g_usb_gone, kills logcat child
+//   8. Main thread fgets() returns EOF → session ends
+//   9. Join sync thread (final flush attempt) → reset → back to step 1
 
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -20,6 +28,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <pthread.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -39,11 +48,14 @@
 #define MAX_LINE               8192
 #define PID_RESCAN_INTERVAL_SEC   2
 #define USB_SCAN_INTERVAL_SEC     5
-#define USB_CHECK_INTERVAL_SEC    5
+#define SYNC_INTERVAL_SEC         5   // how often sync thread checks USB + streams chunks
+#define USB_MISS_MAX              3   // consecutive misses before declaring USB gone (3×5 = 15s)
+#define SYNC_CHUNK_SIZE       65536   // max bytes per file per sync cycle (64 KB)
 
-// Logs always go to owner internal storage regardless of USB state.
 #define OUTPUT_ROOT "/data/media/0/LogDaemon"
 #define RESUME_FILE "/data/media/0/LogDaemon/.last_ts"
+
+// ── data structures ───────────────────────────────────────────────────────────
 
 typedef struct {
     char name[128];
@@ -56,8 +68,8 @@ typedef struct {
 } Package;
 
 typedef struct {
-    char    usb_root[512];    // path of USB drive containing log.sinfo
-    char    session_dir[512]; // output dir on internal storage
+    char    usb_root[512];
+    char    session_dir[512];
     Package packages[MAX_PACKAGES];
     int     package_count;
     char    min_level;
@@ -65,28 +77,34 @@ typedef struct {
     int     logcat_fd;
 } State;
 
-static State        g_state   = {0};
-static volatile int g_running = 1;
+// Immutable after session start — safe to read from sync thread without locks.
+typedef struct {
+    char usb_root[512];       // /mnt/media_rw/<uuid>
+    char usb_session[512];    // /mnt/media_rw/<uuid>/logs/<ts>  (mirror on USB)
+    char session_dir[512];    // /data/media/0/LogDaemon/logs/<ts>
+    char sync_dir[512];       // /data/media/0/LogDaemon/.sync/<ts>
+    int  pkg_count;
+    char pkg_names[MAX_PACKAGES][128];
+} SyncArgs;
+
+static State        g_state    = {0};
+static volatile int g_running  = 1;  // cleared by SIGTERM
+static volatile int g_usb_gone = 0;  // set by sync thread when USB disappears
+
+// ── signal handling ───────────────────────────────────────────────────────────
 
 static void sigterm_handler(int sig) {
     (void)sig;
     g_running = 0;
-    // Kill logcat child immediately so fgets() gets EOF without waiting
-    // for the next log line.
     if (g_state.logcat_pid > 0)
         kill(g_state.logcat_pid, SIGTERM);
 }
 
 // ── USB discovery ─────────────────────────────────────────────────────────────
 
-// Scan /mnt/media_rw/ for a drive containing log.sinfo.
-// As root we can opendir /mnt/media_rw/ directly (raw FAT, no FUSE).
 static int find_usb(void) {
     DIR *d = opendir("/mnt/media_rw");
-    if (!d) {
-        LOGD("opendir /mnt/media_rw: %s", strerror(errno));
-        return 0;
-    }
+    if (!d) { LOGD("opendir /mnt/media_rw: %s", strerror(errno)); return 0; }
 
     struct dirent *e;
     while ((e = readdir(d))) {
@@ -115,12 +133,26 @@ static char *trim(char *s) {
     return s;
 }
 
-// Read config from USB log.sinfo. File is opened and closed here —
-// no USB file handle remains open after this call.
+static void makedirs(const char *path) {
+    char tmp[512];
+    strncpy(tmp, path, sizeof(tmp) - 1);
+    tmp[sizeof(tmp) - 1] = 0;
+    for (char *p = tmp + 1; *p; p++) {
+        if (*p == '/') {
+            *p = 0;
+            if (mkdir(tmp, 0775) < 0 && errno != EEXIST)
+                LOGD("makedirs: %s: %s", tmp, strerror(errno));
+            *p = '/';
+        }
+    }
+    if (mkdir(tmp, 0775) < 0 && errno != EEXIST)
+        LOGD("makedirs: %s: %s", tmp, strerror(errno));
+}
+
+// Read config from USB. File opened and closed here — no USB handle persists.
 static int parse_config(void) {
     char path[600];
     snprintf(path, sizeof(path), "%s/log.sinfo", g_state.usb_root);
-
     FILE *f = fopen(path, "r");
     if (!f) { LOGE("Cannot open config: %s", path); return -1; }
 
@@ -143,31 +175,11 @@ static int parse_config(void) {
         if (in_options && strncmp(p, "min_level=", 10) == 0)
             g_state.min_level = (char)toupper((unsigned char)p[10]);
     }
-    fclose(f);  // USB handle closed here — no further USB dependency
-
-    LOGI("Config: %d package(s), min_level=%c (from %s)",
-         g_state.package_count, g_state.min_level, g_state.usb_root);
+    fclose(f);
+    LOGI("Config: %d package(s), min_level=%c", g_state.package_count, g_state.min_level);
     return 0;
 }
 
-// mkdir -p equivalent: creates every component of path, ignores EEXIST.
-static void makedirs(const char *path) {
-    char tmp[512];
-    strncpy(tmp, path, sizeof(tmp) - 1);
-    tmp[sizeof(tmp) - 1] = 0;
-    for (char *p = tmp + 1; *p; p++) {
-        if (*p == '/') {
-            *p = 0;
-            if (mkdir(tmp, 0775) < 0 && errno != EEXIST)
-                LOGD("makedirs: mkdir %s: %s", tmp, strerror(errno));
-            *p = '/';
-        }
-    }
-    if (mkdir(tmp, 0775) < 0 && errno != EEXIST)
-        LOGD("makedirs: mkdir %s: %s", tmp, strerror(errno));
-}
-
-// Output goes to internal storage, not USB.
 static int create_session_dir(void) {
     time_t now = time(NULL);
     struct tm tm;
@@ -175,22 +187,19 @@ static int create_session_dir(void) {
     char ts[64];
     strftime(ts, sizeof(ts), "%Y-%m-%d_%H-%M-%S", &tm);
 
-    // Build logs/ directory first, creating all parent components.
     char logs_dir[512];
     snprintf(logs_dir, sizeof(logs_dir), "%s/logs", OUTPUT_ROOT);
     makedirs(logs_dir);
 
-    // Verify logs_dir is actually a directory before proceeding.
     struct stat st;
     if (stat(logs_dir, &st) < 0 || !S_ISDIR(st.st_mode)) {
         LOGE("logs dir not usable: %s (%s)", logs_dir, strerror(errno));
         return -1;
     }
 
-    snprintf(g_state.session_dir, sizeof(g_state.session_dir),
-             "%s/%s", logs_dir, ts);
+    snprintf(g_state.session_dir, sizeof(g_state.session_dir), "%s/%s", logs_dir, ts);
     if (mkdir(g_state.session_dir, 0775) < 0) {
-        LOGE("mkdir session %s: %s", g_state.session_dir, strerror(errno));
+        LOGE("mkdir session: %s", strerror(errno));
         return -1;
     }
     LOGI("Session dir: %s", g_state.session_dir);
@@ -238,13 +247,13 @@ static void reset_state(void) {
     g_state.usb_root[0]    = 0;
     g_state.session_dir[0] = 0;
     g_state.package_count  = 0;
+    g_usb_gone             = 0;
     for (int i = 0; i < MAX_PACKAGES; i++)
         memset(&g_state.packages[i], 0, sizeof(Package));
 }
 
-// ── PID tracking ─────────────────────────────────────────────────────────────
+// ── PID tracking ──────────────────────────────────────────────────────────────
 
-// Running as root: /proc scan sees ALL users' processes simultaneously.
 static void rescan_pids(void) {
     for (int i = 0; i < g_state.package_count; i++)
         g_state.packages[i].pid_count = 0;
@@ -266,15 +275,12 @@ static void rescan_pids(void) {
         close(fd);
         if (n <= 0) continue;
         cmdline[n] = 0;
-
-        // Strip sub-process suffix: "com.pkg:service" -> "com.pkg"
         char *colon = strchr(cmdline, ':');
         if (colon) *colon = 0;
 
         for (int i = 0; i < g_state.package_count; i++) {
             Package *pkg = &g_state.packages[i];
-            if (strcmp(cmdline, pkg->name) == 0 &&
-                pkg->pid_count < MAX_PIDS_PER_PKG)
+            if (strcmp(cmdline, pkg->name) == 0 && pkg->pid_count < MAX_PIDS_PER_PKG)
                 pkg->pids[pkg->pid_count++] = pid;
         }
     }
@@ -292,9 +298,6 @@ static int pid_to_package(int pid) {
 
 // ── logcat ────────────────────────────────────────────────────────────────────
 
-// Spawn logcat as root. logd sends ALL users' log entries to root readers.
-// Reads RESUME_FILE and passes -T <timestamp> if present so logd replays
-// any buffered lines since the last checkpoint.
 static int spawn_logcat(void) {
     char resume_ts[64] = {0};
     FILE *rf = fopen(RESUME_FILE, "r");
@@ -338,8 +341,8 @@ static int spawn_logcat(void) {
 // ── log entry parsing & writing ───────────────────────────────────────────────
 
 typedef struct {
-    char timestamp[32];  // "YYYY-MM-DD HH:MM:SS.mmm" written to TSV
-    char raw_ts[32];     // "MM-DD HH:MM:SS.mmm" for logcat -T resume
+    char timestamp[32];  // "YYYY-MM-DD HH:MM:SS.mmm"
+    char raw_ts[32];     // "MM-DD HH:MM:SS.mmm" for logcat -T
     int  pid, tid;
     char level;
     char tag[256];
@@ -357,27 +360,23 @@ static int parse_line(const char *line, LogEntry *e) {
     time_t now = time(NULL);
     struct tm tm;
     localtime_r(&now, &tm);
-    snprintf(e->timestamp, sizeof(e->timestamp), "%d-%s %s",
-             tm.tm_year + 1900, date, time_s);
-    snprintf(e->raw_ts, sizeof(e->raw_ts), "%s %s", date, time_s);
+    snprintf(e->timestamp, sizeof(e->timestamp), "%d-%s %s", tm.tm_year + 1900, date, time_s);
+    snprintf(e->raw_ts,    sizeof(e->raw_ts),    "%s %s", date, time_s);
     e->pid = pid; e->tid = tid; e->level = level;
 
     const char *rest  = line + consumed;
     const char *colon = strstr(rest, ": ");
     if (colon) {
-        size_t tag_len = (size_t)(colon - rest);
-        if (tag_len >= sizeof(e->tag)) tag_len = sizeof(e->tag) - 1;
-        memcpy(e->tag, rest, tag_len);
-        e->tag[tag_len] = 0;
-        while (tag_len > 0 && isspace((unsigned char)e->tag[tag_len - 1]))
-            e->tag[--tag_len] = 0;
+        size_t tl = (size_t)(colon - rest);
+        if (tl >= sizeof(e->tag)) tl = sizeof(e->tag) - 1;
+        memcpy(e->tag, rest, tl); e->tag[tl] = 0;
+        while (tl > 0 && isspace((unsigned char)e->tag[tl - 1])) e->tag[--tl] = 0;
         strncpy(e->message, colon + 2, sizeof(e->message) - 1);
-        e->message[sizeof(e->message) - 1] = 0;
     } else {
         e->tag[0] = 0;
         strncpy(e->message, rest, sizeof(e->message) - 1);
-        e->message[sizeof(e->message) - 1] = 0;
     }
+    e->message[sizeof(e->message) - 1] = 0;
     return 0;
 }
 
@@ -399,8 +398,8 @@ static int write_entry(int pkg_idx, const LogEntry *e, const char *raw_line) {
     if (fprintf(pkg->raw, "%s\n", raw_line) < 0) return -1;
 
     char tag_c[256], msg_c[8192];
-    strncpy(tag_c, e->tag,     sizeof(tag_c) - 1); tag_c[sizeof(tag_c) - 1] = 0;
-    strncpy(msg_c, e->message, sizeof(msg_c) - 1); msg_c[sizeof(msg_c) - 1] = 0;
+    strncpy(tag_c, e->tag,     sizeof(tag_c) - 1); tag_c[sizeof(tag_c)-1] = 0;
+    strncpy(msg_c, e->message, sizeof(msg_c) - 1); msg_c[sizeof(msg_c)-1] = 0;
     tsv_clean(tag_c); tsv_clean(msg_c);
 
     if (fprintf(pkg->tsv, "%s\t%d\t%d\t%c\t%s\t%s\n",
@@ -418,6 +417,95 @@ static int write_entry(int pkg_idx, const LogEntry *e, const char *raw_line) {
     return 0;
 }
 
+// ── USB sync thread ───────────────────────────────────────────────────────────
+
+// Stream new bytes from src_path (internal) to dst_path (USB), tracking
+// position in off_path. Open-write-close per call: USB handle open <50ms.
+static void sync_one_file(const char *src_path, const char *dst_path,
+                           const char *off_path) {
+    long offset = 0;
+    {
+        FILE *f = fopen(off_path, "r");
+        if (f) { fscanf(f, "%ld", &offset); fclose(f); }
+    }
+
+    FILE *src = fopen(src_path, "r");
+    if (!src) return;
+    if (fseek(src, offset, SEEK_SET) != 0) { fclose(src); return; }
+
+    char buf[SYNC_CHUNK_SIZE];
+    size_t n = fread(buf, 1, sizeof(buf), src);
+    fclose(src);
+    if (n == 0) return;
+
+    FILE *dst = fopen(dst_path, "a");
+    if (!dst) return;
+    size_t written = fwrite(buf, 1, n, dst);
+    fflush(dst);
+    fclose(dst);
+
+    // Only advance offset if the full chunk was written — partial write retried next cycle
+    if (written == n) {
+        FILE *f = fopen(off_path, "w");
+        if (f) { fprintf(f, "%ld\n", offset + (long)n); fclose(f); }
+    }
+}
+
+static void sync_all_packages(const SyncArgs *sa) {
+    for (int i = 0; i < sa->pkg_count; i++) {
+        char src[600], dst[600], off[600];
+
+        snprintf(src, sizeof(src), "%s/%s.log",     sa->session_dir,  sa->pkg_names[i]);
+        snprintf(dst, sizeof(dst), "%s/%s.log",     sa->usb_session,  sa->pkg_names[i]);
+        snprintf(off, sizeof(off), "%s/%s_log.off", sa->sync_dir,     sa->pkg_names[i]);
+        sync_one_file(src, dst, off);
+
+        snprintf(src, sizeof(src), "%s/%s.log.tsv", sa->session_dir,  sa->pkg_names[i]);
+        snprintf(dst, sizeof(dst), "%s/%s.log.tsv", sa->usb_session,  sa->pkg_names[i]);
+        snprintf(off, sizeof(off), "%s/%s_tsv.off", sa->sync_dir,     sa->pkg_names[i]);
+        sync_one_file(src, dst, off);
+    }
+}
+
+static void *sync_thread_func(void *arg) {
+    SyncArgs *sa = (SyncArgs *)arg;
+    int miss = 0;
+
+    makedirs(sa->usb_session);
+    LOGI("Sync thread started → USB: %s", sa->usb_session);
+
+    while (g_running && !g_usb_gone) {
+        sleep(SYNC_INTERVAL_SEC);
+        if (!g_running) break;
+
+        // Check USB presence
+        struct stat st;
+        if (stat(sa->usb_root, &st) < 0 || !S_ISDIR(st.st_mode)) {
+            miss++;
+            LOGD("Sync: USB miss %d/%d", miss, USB_MISS_MAX);
+            if (miss >= USB_MISS_MAX) {
+                LOGI("Sync: USB gone after %ds — stopping capture",
+                     miss * SYNC_INTERVAL_SEC);
+                g_usb_gone = 1;
+                // Unblock main thread's fgets()
+                if (g_state.logcat_pid > 0)
+                    kill(g_state.logcat_pid, SIGTERM);
+                break;
+            }
+            continue;  // skip sync this cycle, USB may be in transition
+        }
+        miss = 0;
+
+        sync_all_packages(sa);
+    }
+
+    // Final flush: attempt to sync remaining bytes before thread exits.
+    // If USB is gone this is a no-op (fopen on USB path fails silently).
+    sync_all_packages(sa);
+    LOGI("Sync thread exiting");
+    return NULL;
+}
+
 // ── session metadata ──────────────────────────────────────────────────────────
 
 static void write_session_meta(time_t start_time) {
@@ -429,8 +517,7 @@ static void write_session_meta(time_t start_time) {
     struct tm tm;
     localtime_r(&start_time, &tm);
     strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &tm);
-    fprintf(f, "session_start=%s\nlogv4=1\nuid=%d\nhelper_pid=%d\nmin_level=%c\n"
-               "usb_source=%s\n",
+    fprintf(f, "session_start=%s\nlogv4=1\nuid=%d\npid=%d\nmin_level=%c\nusb=%s\n",
             ts, getuid(), getpid(), g_state.min_level, g_state.usb_root);
     fprintf(f, "packages:\n");
     for (int i = 0; i < g_state.package_count; i++)
@@ -457,8 +544,6 @@ static void write_summary(time_t start_t, time_t end_t) {
 
 // ── capture session ───────────────────────────────────────────────────────────
 
-// Runs until SIGTERM or a write error. No USB handles open during this call —
-// capture continues regardless of USB state (profile switches, vold, unplug).
 static void run_session(void) {
     time_t session_start = time(NULL);
     write_session_meta(session_start);
@@ -470,18 +555,42 @@ static void run_session(void) {
     if (!logf) { LOGE("fdopen failed"); return; }
     g_state.logcat_fd = -1;
 
+    // Build SyncArgs — immutable session params for the sync thread.
+    // Lives on this stack frame; safe because we pthread_join before returning.
+    SyncArgs sa = {0};
+    strncpy(sa.usb_root,    g_state.usb_root,    sizeof(sa.usb_root)    - 1);
+    strncpy(sa.session_dir, g_state.session_dir, sizeof(sa.session_dir) - 1);
+    sa.pkg_count = g_state.package_count;
+    for (int i = 0; i < sa.pkg_count; i++)
+        strncpy(sa.pkg_names[i], g_state.packages[i].name, 127);
+
+    // USB mirror:  /mnt/media_rw/<uuid>/logs/<session-basename>
+    const char *sbase = strrchr(g_state.session_dir, '/');
+    sbase = sbase ? sbase + 1 : g_state.session_dir;
+    snprintf(sa.usb_session, sizeof(sa.usb_session),
+             "%s/logs/%s", g_state.usb_root, sbase);
+
+    // Offset tracking dir on internal storage
+    snprintf(sa.sync_dir, sizeof(sa.sync_dir),
+             "%s/.sync/%s", OUTPUT_ROOT, sbase);
+    makedirs(sa.sync_dir);
+
+    pthread_t sync_tid;
+    if (pthread_create(&sync_tid, NULL, sync_thread_func, &sa) != 0) {
+        LOGE("pthread_create failed: %s", strerror(errno));
+        fclose(logf);
+        return;
+    }
+
+    // ── main capture loop ─────────────────────────────────────────────────────
+    // Pure capture: read logcat, write to internal storage.
+    // USB presence and sync are fully handled by the sync thread.
+
     char line[MAX_LINE];
-    time_t last_rescan    = time(NULL);
-    time_t last_usb_check = time(NULL);
-    int    usb_miss       = 0;
+    time_t last_rescan = time(NULL);
     long   lines_total = 0, lines_matched = 0;
 
-    // Require USB absent for 3 consecutive checks (≥15s) before stopping.
-    // A single miss during a profile-switch transition resets on the next
-    // successful check, preventing false stops from transient mount gaps.
-    const int USB_MISS_MAX = 3;
-
-    while (g_running && fgets(line, sizeof(line), logf)) {
+    while (g_running && !g_usb_gone && fgets(line, sizeof(line), logf)) {
         size_t l = strlen(line);
         while (l > 0 && (line[l-1] == '\n' || line[l-1] == '\r')) line[--l] = 0;
         if (l == 0) continue;
@@ -504,35 +613,28 @@ static void run_session(void) {
             rescan_pids();
             last_rescan = now;
         }
-        if (now - last_usb_check >= USB_CHECK_INTERVAL_SEC) {
-            last_usb_check = now;
-            struct stat st;
-            if (stat(g_state.usb_root, &st) < 0 || !S_ISDIR(st.st_mode)) {
-                usb_miss++;
-                LOGD("USB check: miss %d/%d", usb_miss, USB_MISS_MAX);
-                if (usb_miss >= USB_MISS_MAX) {
-                    LOGI("USB gone (%ds) — stopping capture", usb_miss * USB_CHECK_INTERVAL_SEC);
-                    break;
-                }
-            } else {
-                usb_miss = 0;  // transient gap recovered — keep capturing
-            }
-        }
     }
 
-    LOGI("Session end: total=%ld matched=%ld", lines_total, lines_matched);
+    LOGI("Capture loop ended: total=%ld matched=%ld", lines_total, lines_matched);
 
+    // Stop logcat child if still running (e.g. loop ended due to g_usb_gone)
     if (g_state.logcat_pid > 0) {
         kill(g_state.logcat_pid, SIGTERM);
         waitpid(g_state.logcat_pid, NULL, 0);
         g_state.logcat_pid = 0;
     }
     fclose(logf);
+
+    // Flush internal storage writers before sync thread does its final pass
     close_writers();
+
+    // Wait for sync thread — it will attempt one final flush to USB
+    pthread_join(sync_tid, NULL);
+
     write_summary(session_start, time(NULL));
 }
 
-// ── main ─────────────────────────────────────────────────────────────────────
+// ── main ──────────────────────────────────────────────────────────────────────
 
 int main(void) {
     signal(SIGHUP,  SIG_IGN);
@@ -546,14 +648,12 @@ int main(void) {
     LOGI("Output root: %s", OUTPUT_ROOT);
 
     while (g_running) {
-        // Wait for USB drive with log.sinfo
         if (!find_usb()) {
             LOGD("No USB with log.sinfo — retrying in %ds", USB_SCAN_INTERVAL_SEC);
             sleep(USB_SCAN_INTERVAL_SEC);
             continue;
         }
 
-        // Read config from USB. After this call, no USB handles remain open.
         if (parse_config() < 0 || g_state.package_count == 0) {
             LOGE("Config invalid or no packages");
             reset_state();
@@ -561,15 +661,11 @@ int main(void) {
             continue;
         }
 
-        // Create output on internal storage
         if (create_session_dir() < 0) { reset_state(); sleep(USB_SCAN_INTERVAL_SEC); continue; }
         if (open_writers()       < 0) { reset_state(); sleep(USB_SCAN_INTERVAL_SEC); continue; }
 
-        LOGI("Capture started — writing to internal storage (USB may be removed safely)");
-
-        // Capture runs indefinitely. USB removal/profile switches do not stop this.
+        LOGI("Session started — capture: internal storage | sync: USB");
         run_session();
-
         reset_state();
     }
 
