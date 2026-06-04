@@ -21,50 +21,83 @@ Running as `user root` via `init.rc` gives the daemon:
 ## System Architecture
 
 ```plantuml
-@startuml
-!theme plain
-skinparam componentStyle rectangle
-skinparam defaultFontSize 13
-skinparam ArrowColor #555555
-skinparam componentBorderColor #888888
+@startmindmap
 
-package "Android Init" #f0f4ff {
-  [logdaemon.rc] as rc
-  [init process] as init
+<style>
+mindmapDiagram {
+  node {
+    BackgroundColor #ffffff
+    BorderColor #cccccc
+    FontSize 12
+    Padding 10
+    RoundCorner 8
+  }
+  rootNode {
+    BackgroundColor #1e293b
+    FontColor #ffffff
+    FontSize 14
+    FontStyle bold
+    BorderColor #1e293b
+    Padding 14
+    RoundCorner 10
+  }
+  .init {
+    BackgroundColor #dbeafe
+    BorderColor #3b82f6
+    FontColor #1e3a5f
+  }
+  .trigger {
+    BackgroundColor #ede9fe
+    BorderColor #7c3aed
+    FontColor #3b0764
+  }
+  .capture {
+    BackgroundColor #dcfce7
+    BorderColor #16a34a
+    FontColor #14532d
+  }
+  .sync {
+    BackgroundColor #fef9c3
+    BorderColor #ca8a04
+    FontColor #713f12
+  }
+  .output {
+    BackgroundColor #ffedd5
+    BorderColor #ea580c
+    FontColor #7c2d12
+  }
 }
+</style>
 
-package "System Binary" #fff4e0 {
-  [/system/bin/logdaemon\n(uid = root)] as daemon
-}
+* logdaemon
 
-package "logd" #f5f5f5 {
-  [Log Buffer\n(all user profiles)] as logbuf
-}
+** Init <<init>>
+*** Managed by Android init
+*** Runs as root  (uid = 0)
+*** Auto-restarts after 5 s
 
-package "Android User Profiles" #efffef {
-  [User 0 — Owner] as u0
-  [User 1 — Secondary] as u1
-}
+** USB Trigger <<trigger>>
+*** Scans /mnt/media_rw/ on boot
+*** Reads log.sinfo — closes immediately
+*** No file handles kept open
 
-package "Internal Storage" #fffbe6 {
-  [/data/media/0/LogDaemon/\nlogs/<session>/] as intstor
-}
+** Main Thread <<capture>>
+*** Reads logcat pipe as root
+*** Captures all user profiles
+*** Writes continuously to internal storage
 
-package "USB Drive  /mnt/media_rw/" #fef0f0 {
-  [log.sinfo\n(config trigger)] as sinfo
-  [logs/<session>/\n(synced copy)] as usbout
-}
+-- Sync Thread <<sync>>
+--- Wakes every 5 s
+--- Pushes 64 KB chunks to USB
+--- 3 consecutive misses = stop session
 
-rc       --> init     : defines service
-init     --> daemon   : starts at boot\n(user = root)
-u0       --> logbuf   : writes logs
-u1       --> logbuf   : writes logs
-daemon   --> sinfo    : reads once at startup\nthen closes
-daemon   --> logbuf   : reads ALL users' entries\n(root bypasses UID filter)
-daemon   --> intstor  : main thread — continuous write
-daemon   --> usbout   : sync thread — 64 KB chunks\nevery 5 s
+-- Output <<output>>
+--- Internal Storage
+--- /data/media/0/LogDaemon/logs/
+--- USB Mirror
+--- /mnt/media_rw/<uuid>/logs/  (≤ 5 s lag)
 
-@enduml
+@endmindmap
 ```
 
 ---
