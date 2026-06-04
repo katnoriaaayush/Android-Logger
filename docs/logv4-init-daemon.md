@@ -21,99 +21,87 @@ Running as `user root` via `init.rc` gives the daemon:
 ## System Architecture
 
 ```plantuml
-@startmindmap
+@startuml
+!theme plain
 
-<style>
-mindmapDiagram {
-  node {
-    BackgroundColor #ffffff
-    BorderColor #cccccc
-    FontSize 12
-    Padding 10
-    RoundCorner 8
-  }
-  rootNode {
-    BackgroundColor #1e293b
-    FontColor #ffffff
-    FontSize 14
-    FontStyle bold
-    BorderColor #1e293b
-    Padding 14
-    RoundCorner 10
-  }
-  .s1 {
-    BackgroundColor #dbeafe
-    BorderColor #3b82f6
-    FontColor #1e3a5f
-  }
-  .s2 {
-    BackgroundColor #ede9fe
-    BorderColor #7c3aed
-    FontColor #3b0764
-  }
-  .s3 {
-    BackgroundColor #dcfce7
-    BorderColor #16a34a
-    FontColor #14532d
-  }
-  .s4 {
-    BackgroundColor #fef9c3
-    BorderColor #ca8a04
-    FontColor #713f12
-  }
-  .s5 {
-    BackgroundColor #fce7f3
-    BorderColor #db2777
-    FontColor #831843
-  }
-  .s6 {
-    BackgroundColor #ffedd5
-    BorderColor #ea580c
-    FontColor #7c2d12
-  }
+skinparam defaultFontSize 12
+skinparam backgroundColor #ffffff
+skinparam padding 8
+
+skinparam state {
+    BackgroundColor         #f8fafc
+    BorderColor             #94a3b8
+    BorderThickness         1.5
+    FontColor               #1e293b
+    FontStyle               bold
+    AttributeFontSize       11
+    AttributeFontColor      #475569
+    ArrowColor              #64748b
+    ArrowFontSize           11
+    ArrowFontColor          #475569
+    StartColor              #1e293b
+    EndColor                #1e293b
+    CompositeBackgroundColor  #f1f5f9
+    CompositeBorderColor      #94a3b8
 }
-</style>
 
-* logdaemon\nFlow States
+[*] --> Boot
 
-** 1 · Boot <<s1>>
-*** init reads logdaemon.rc
-*** Starts as uid = 0 (root)
-*** Waits for sys.boot_completed=1
+state "  1 · Boot  " as Boot #dbeafe / #bfdbfe {
+    Boot : Daemon started by **init**
+    Boot : Runs as  uid = 0  (root)
+    Boot : Waits for  sys.boot_completed = 1
+}
 
-** 2 · USB Detection <<s2>>
-*** Scans /mnt/media_rw/ every 5 s
-*** Finds log.sinfo → reads package list
-*** File closed immediately
-*** No USB handle kept open
+state "  2 · USB Detection  " as Detect #ede9fe / #ddd6fe {
+    Detect : Scans /mnt/media_rw/  every 5 s
+    Detect : Finds log.sinfo  →  reads package list + options
+    Detect : File closed immediately — no USB handle retained
+}
 
-** 3 · Session Start <<s3>>
-*** Creates /data/media/0/LogDaemon/logs/<ts>/
-*** Opens .log and .tsv writers
-*** Spawns sync thread
-*** Forks logcat -T <last_ts> as root
+state "  3 · Session Start  " as Start #dcfce7 / #bbf7d0 {
+    Start : Creates  /data/media/0/LogDaemon/logs/<ts>/
+    Start : Opens  .log  and  .tsv  writers per package
+    Start : Spawns sync thread
+    Start : Forks  logcat -T <last_ts>  as root
+}
 
-** 4 · Active Capture <<s4>>
-*** Main thread reads logcat pipe
-*** Matches PIDs → all user profiles
-*** Writes to internal storage only
-*** Checkpoints timestamp every 64 lines
+state "  4 · Active Session  " as Active {
 
--- 5 · USB Sync (parallel) <<s5>>
---- Sync thread wakes every 5 s
---- stat(/mnt/media_rw/<uuid>/)
---- Streams 64 KB chunks → USB
---- open → write → close per cycle
---- Miss counter: 3 misses = USB gone
+    state "  Main Thread  " as Main #d1fae5 / #a7f3d0 {
+        Main : Reads logcat pipe  (root — all user profiles)
+        Main : Parses line  →  matches PID to package
+        Main : Writes  .log  /  .tsv  to internal storage
+        Main : Checkpoints  .last_ts  every 64 lines
+    }
 
--- 6 · Session End <<s6>>
---- USB ejected → g_usb_gone = 1
---- Main thread exits capture loop
---- Writers closed, summary written
---- Sync thread does final USB flush
---- init restarts daemon after 5 s
+    --
 
-@endmindmap
+    state "  Sync Thread  " as Sync #fef9c3 / #fde68a {
+        Sync : Wakes every 5 s
+        Sync : stat ( /mnt/media_rw/<uuid>/ )
+        Sync : Reads offset  →  streams 64 KB chunk to USB
+        Sync : open  →  fwrite  →  close  per cycle
+        Sync : 3 consecutive misses  →  signals USB gone
+    }
+
+}
+
+state "  5 · Session End  " as End #ffedd5 / #fed7aa {
+    End : g_usb_gone = 1  →  capture loop exits
+    End : Writers closed  ·  _summary.tsv written
+    End : Sync thread performs final USB flush
+    End : init restarts daemon after 5 s
+}
+
+Boot    -->  Detect  : boot_completed = 1
+Detect  -->  Detect  : log.sinfo not found
+Detect  -->  Start   : log.sinfo found
+Start   -->  Active  : threads running
+Active  -->  End     : USB ejected\n(3 consecutive misses)
+End     -up->  Detect  : restarted by init
+
+@enduml
 ```
 
 ---
