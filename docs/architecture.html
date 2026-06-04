@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: 'Segoe UI', Arial, sans-serif;
+    background: #ffffff;
+    padding: 48px 56px 56px;
+    width: 980px;
+  }
+
+  h1 {
+    text-align: center;
+    font-size: 20px;
+    font-weight: 700;
+    color: #1e293b;
+    margin-bottom: 8px;
+    letter-spacing: 0.4px;
+  }
+
+  .subtitle {
+    text-align: center;
+    font-size: 12px;
+    color: #64748b;
+    margin-bottom: 44px;
+    letter-spacing: 0.2px;
+  }
+
+  /* ── flow column ── */
+  .flow {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0;
+  }
+
+  /* ── individual state card ── */
+  .state {
+    border-radius: 12px;
+    border: 1.5px solid;
+    width: 780px;
+    padding: 16px 24px 18px;
+    position: relative;
+  }
+
+  .state-title {
+    font-size: 13px;
+    font-weight: 700;
+    margin-bottom: 10px;
+    letter-spacing: 0.3px;
+  }
+
+  .state-body {
+    font-size: 11.5px;
+    color: #374151;
+    line-height: 1.7;
+  }
+
+  .state-body li { list-style: none; padding-left: 14px; position: relative; }
+  .state-body li::before { content: "·"; position: absolute; left: 0; color: #9ca3af; }
+
+  /* ── colours ── */
+  .s-boot    { background: #eff6ff; border-color: #93c5fd; }
+  .s-boot    .state-title { color: #1d4ed8; }
+
+  .s-detect  { background: #f5f3ff; border-color: #c4b5fd; }
+  .s-detect  .state-title { color: #6d28d9; }
+
+  .s-start   { background: #f0fdf4; border-color: #86efac; }
+  .s-start   .state-title { color: #15803d; }
+
+  .s-active  { background: #f8fafc; border-color: #cbd5e1; }
+  .s-active  .state-title { color: #334155; }
+
+  .s-end     { background: #fff7ed; border-color: #fdba74; }
+  .s-end     .state-title { color: #c2410c; }
+
+  /* ── concurrent threads inside Active ── */
+  .threads {
+    display: flex;
+    gap: 16px;
+    margin-top: 4px;
+  }
+
+  .thread {
+    flex: 1;
+    border-radius: 8px;
+    border: 1.5px solid;
+    padding: 12px 16px 14px;
+  }
+
+  .thread-title {
+    font-size: 11.5px;
+    font-weight: 700;
+    margin-bottom: 8px;
+  }
+
+  .t-main  { background: #ecfdf5; border-color: #6ee7b7; }
+  .t-main  .thread-title { color: #065f46; }
+
+  .t-sync  { background: #fefce8; border-color: #fde047; }
+  .t-sync  .thread-title { color: #854d0e; }
+
+  .parallel-badge {
+    font-size: 10px;
+    font-weight: 600;
+    color: #6b7280;
+    text-align: center;
+    margin-bottom: 10px;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+  }
+
+  /* ── arrows between states ── */
+  .arrow {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    margin: 0;
+    padding: 6px 0;
+  }
+
+  .arrow-line {
+    width: 2px;
+    height: 22px;
+    background: #94a3b8;
+  }
+
+  .arrow-head {
+    width: 0;
+    height: 0;
+    border-left: 6px solid transparent;
+    border-right: 6px solid transparent;
+    border-top: 8px solid #94a3b8;
+  }
+
+  .arrow-label {
+    font-size: 10.5px;
+    color: #64748b;
+    background: #ffffff;
+    border: 1px solid #e2e8f0;
+    border-radius: 4px;
+    padding: 1px 7px;
+    margin-bottom: 3px;
+    letter-spacing: 0.1px;
+  }
+
+  .arrow-label.loop {
+    border-color: #a78bfa;
+    color: #6d28d9;
+  }
+
+  /* ── self-loop for Detect ── */
+  .self-loop-container {
+    position: relative;
+    width: 780px;
+  }
+
+  .self-loop-badge {
+    position: absolute;
+    right: -2px;
+    top: 50%;
+    transform: translateY(-50%);
+    background: #f5f3ff;
+    border: 1px solid #c4b5fd;
+    border-radius: 6px;
+    font-size: 10px;
+    color: #6d28d9;
+    padding: 3px 9px;
+    white-space: nowrap;
+  }
+
+  /* ── restart arrow (bottom back to top visual) ── */
+  .restart-row {
+    display: flex;
+    align-items: center;
+    width: 780px;
+    margin-top: 6px;
+    padding: 10px 16px;
+    background: #f8fafc;
+    border: 1.5px dashed #94a3b8;
+    border-radius: 10px;
+    gap: 12px;
+  }
+
+  .restart-row .arrow-back {
+    font-size: 18px;
+    color: #64748b;
+  }
+
+  .restart-row span {
+    font-size: 11px;
+    color: #64748b;
+  }
+
+  .step-num {
+    display: inline-block;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    font-size: 11px;
+    font-weight: 700;
+    text-align: center;
+    line-height: 22px;
+    margin-right: 8px;
+    flex-shrink: 0;
+  }
+
+  .n-boot   { background: #dbeafe; color: #1d4ed8; }
+  .n-detect { background: #ede9fe; color: #6d28d9; }
+  .n-start  { background: #dcfce7; color: #15803d; }
+  .n-active { background: #e2e8f0; color: #334155; }
+  .n-end    { background: #fed7aa; color: #c2410c; }
+</style>
+</head>
+<body>
+
+<h1>logdaemon — Flow State Architecture</h1>
+<p class="subtitle">init.rc Native Daemon &nbsp;·&nbsp; Android Log Capture System</p>
+
+<div class="flow">
+
+  <!-- STATE 1: BOOT -->
+  <div class="state s-boot">
+    <div class="state-title">
+      <span class="step-num n-boot">1</span>Boot
+    </div>
+    <ul class="state-body">
+      <li><b>init</b> reads <code>logdaemon.rc</code> at boot</li>
+      <li>Daemon started as &nbsp;<code>uid = 0</code>&nbsp; (root)</li>
+      <li>Waits for &nbsp;<code>sys.boot_completed = 1</code>&nbsp; before proceeding</li>
+      <li>Auto-restarts every 5 s if process exits</li>
+    </ul>
+  </div>
+
+  <!-- ARROW -->
+  <div class="arrow">
+    <div class="arrow-label">boot_completed = 1</div>
+    <div class="arrow-line"></div>
+    <div class="arrow-head"></div>
+  </div>
+
+  <!-- STATE 2: USB DETECTION -->
+  <div class="self-loop-container">
+    <div class="state s-detect">
+      <div class="state-title">
+        <span class="step-num n-detect">2</span>USB Detection
+      </div>
+      <ul class="state-body">
+        <li>Scans &nbsp;<code>/mnt/media_rw/</code>&nbsp; every 5 s</li>
+        <li>Finds <code>log.sinfo</code> → reads package list + min log level</li>
+        <li>File closed <b>immediately</b> after read — no USB handle retained</li>
+        <li>Loops back if <code>log.sinfo</code> not found</li>
+      </ul>
+    </div>
+    <div class="self-loop-badge">↺ &nbsp;log.sinfo not found — sleep 5 s</div>
+  </div>
+
+  <!-- ARROW -->
+  <div class="arrow">
+    <div class="arrow-label">log.sinfo found</div>
+    <div class="arrow-line"></div>
+    <div class="arrow-head"></div>
+  </div>
+
+  <!-- STATE 3: SESSION START -->
+  <div class="state s-start">
+    <div class="state-title">
+      <span class="step-num n-start">3</span>Session Start
+    </div>
+    <ul class="state-body">
+      <li>Creates &nbsp;<code>/data/media/0/LogDaemon/logs/&lt;timestamp&gt;/</code></li>
+      <li>Opens &nbsp;<code>.log</code>&nbsp; and &nbsp;<code>.tsv</code>&nbsp; writers per target package</li>
+      <li>Spawns sync thread</li>
+      <li>Forks &nbsp;<code>logcat -T &lt;last_ts&gt;</code>&nbsp; as root — replays ring buffer from last checkpoint</li>
+    </ul>
+  </div>
+
+  <!-- ARROW -->
+  <div class="arrow">
+    <div class="arrow-label">threads running</div>
+    <div class="arrow-line"></div>
+    <div class="arrow-head"></div>
+  </div>
+
+  <!-- STATE 4: ACTIVE SESSION -->
+  <div class="state s-active">
+    <div class="state-title">
+      <span class="step-num n-active">4</span>Active Session
+    </div>
+    <div class="parallel-badge">── running in parallel ──</div>
+    <div class="threads">
+
+      <div class="thread t-main">
+        <div class="thread-title">Main Thread</div>
+        <ul class="state-body">
+          <li>Reads logcat pipe as root</li>
+          <li>Captures logs from <b>all</b> user profiles</li>
+          <li>Matches PID → target package</li>
+          <li>Writes <code>.log</code> / <code>.tsv</code> to internal storage</li>
+          <li>Checkpoints <code>.last_ts</code> every 64 lines</li>
+        </ul>
+      </div>
+
+      <div class="thread t-sync">
+        <div class="thread-title">Sync Thread</div>
+        <ul class="state-body">
+          <li>Wakes every 5 s</li>
+          <li>Checks USB via &nbsp;<code>stat()</code></li>
+          <li>Reads offset → streams 64 KB chunk</li>
+          <li><code>open → fwrite → close</code>&nbsp; per cycle</li>
+          <li>3 consecutive misses = USB gone</li>
+        </ul>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ARROW -->
+  <div class="arrow">
+    <div class="arrow-label">USB ejected &nbsp;(3 consecutive misses · 15 s)</div>
+    <div class="arrow-line"></div>
+    <div class="arrow-head"></div>
+  </div>
+
+  <!-- STATE 5: SESSION END -->
+  <div class="state s-end">
+    <div class="state-title">
+      <span class="step-num n-end">5</span>Session End
+    </div>
+    <ul class="state-body">
+      <li><code>g_usb_gone = 1</code> → capture loop exits cleanly</li>
+      <li>Log writers flushed and closed</li>
+      <li><code>_summary.tsv</code> written to internal storage</li>
+      <li>Sync thread performs final USB flush</li>
+      <li>Process exits → <b>init</b> restarts daemon after 5 s</li>
+    </ul>
+  </div>
+
+  <!-- RESTART LOOP -->
+  <div class="restart-row">
+    <span class="arrow-back">↺</span>
+    <span><b>init</b> restarts logdaemon after 5 s &nbsp;→&nbsp; returns to <b>USB Detection</b> (step 2)</span>
+  </div>
+
+</div>
+</body>
+</html>
