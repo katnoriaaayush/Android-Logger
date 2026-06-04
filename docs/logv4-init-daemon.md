@@ -41,27 +41,32 @@ mindmapDiagram {
     Padding 14
     RoundCorner 10
   }
-  .init {
+  .s1 {
     BackgroundColor #dbeafe
     BorderColor #3b82f6
     FontColor #1e3a5f
   }
-  .trigger {
+  .s2 {
     BackgroundColor #ede9fe
     BorderColor #7c3aed
     FontColor #3b0764
   }
-  .capture {
+  .s3 {
     BackgroundColor #dcfce7
     BorderColor #16a34a
     FontColor #14532d
   }
-  .sync {
+  .s4 {
     BackgroundColor #fef9c3
     BorderColor #ca8a04
     FontColor #713f12
   }
-  .output {
+  .s5 {
+    BackgroundColor #fce7f3
+    BorderColor #db2777
+    FontColor #831843
+  }
+  .s6 {
     BackgroundColor #ffedd5
     BorderColor #ea580c
     FontColor #7c2d12
@@ -69,33 +74,44 @@ mindmapDiagram {
 }
 </style>
 
-* logdaemon
+* logdaemon\nFlow States
 
-** Init <<init>>
-*** Managed by Android init
-*** Runs as root  (uid = 0)
-*** Auto-restarts after 5 s
+** 1 · Boot <<s1>>
+*** init reads logdaemon.rc
+*** Starts as uid = 0 (root)
+*** Waits for sys.boot_completed=1
 
-** USB Trigger <<trigger>>
-*** Scans /mnt/media_rw/ on boot
-*** Reads log.sinfo — closes immediately
-*** No file handles kept open
+** 2 · USB Detection <<s2>>
+*** Scans /mnt/media_rw/ every 5 s
+*** Finds log.sinfo → reads package list
+*** File closed immediately
+*** No USB handle kept open
 
-** Main Thread <<capture>>
-*** Reads logcat pipe as root
-*** Captures all user profiles
-*** Writes continuously to internal storage
+** 3 · Session Start <<s3>>
+*** Creates /data/media/0/LogDaemon/logs/<ts>/
+*** Opens .log and .tsv writers
+*** Spawns sync thread
+*** Forks logcat -T <last_ts> as root
 
--- Sync Thread <<sync>>
---- Wakes every 5 s
---- Pushes 64 KB chunks to USB
---- 3 consecutive misses = stop session
+** 4 · Active Capture <<s4>>
+*** Main thread reads logcat pipe
+*** Matches PIDs → all user profiles
+*** Writes to internal storage only
+*** Checkpoints timestamp every 64 lines
 
--- Output <<output>>
---- Internal Storage
---- /data/media/0/LogDaemon/logs/
---- USB Mirror
---- /mnt/media_rw/<uuid>/logs/  (≤ 5 s lag)
+-- 5 · USB Sync (parallel) <<s5>>
+--- Sync thread wakes every 5 s
+--- stat(/mnt/media_rw/<uuid>/)
+--- Streams 64 KB chunks → USB
+--- open → write → close per cycle
+--- Miss counter: 3 misses = USB gone
+
+-- 6 · Session End <<s6>>
+--- USB ejected → g_usb_gone = 1
+--- Main thread exits capture loop
+--- Writers closed, summary written
+--- Sync thread does final USB flush
+--- init restarts daemon after 5 s
 
 @endmindmap
 ```
