@@ -363,6 +363,33 @@ main  -> init : exit → init restarts\nafter restart_period 5s
 
 ---
 
+## How Logs Are Written to USB
+
+Logs are **never written directly to USB**. USB is used only as a mirror, synced from internal storage.
+
+### Flow
+
+1. **Main thread** writes all logs continuously to internal storage `/data/media/0/LogDaemon/logs/<session>/`
+
+2. **Sync thread** wakes every 5 seconds and:
+   - Checks USB presence via `stat(/mnt/media_rw/<uuid>/)`
+   - Reads the current byte offset from `.sync/<session>/<pkg>_log.off`
+   - Opens the internal `.log`, reads a 64 KB chunk from that offset
+   - Opens the USB `.log`, writes the chunk, closes immediately
+   - Updates the offset file
+
+3. Result: USB mirror is **≤ 5 seconds behind** internal storage
+
+### Why Offset Tracking?
+
+If USB is temporarily missing (profile switch, transient gap), the offset is preserved. When USB comes back, the sync thread resumes from where it left off — no data is lost or duplicated.
+
+### Why open → write → close Every Cycle?
+
+Keeping the USB file handle open would cause vold to send `SIGTERM` to the daemon during profile switches — vold must terminate all holders before it can manage the volume. Opening and closing within each 5-second cycle means the handle is held for under 50 ms. vold never sees a persistent holder.
+
+---
+
 ## Output Structure
 
 ```
