@@ -26,23 +26,18 @@ Running as `user root` via `init.rc` gives the daemon:
 
 skinparam defaultFontSize 12
 skinparam backgroundColor #ffffff
-skinparam padding 8
 
 skinparam state {
-    BackgroundColor         #f8fafc
-    BorderColor             #94a3b8
-    BorderThickness         1.5
-    FontColor               #1e293b
-    FontStyle               bold
-    AttributeFontSize       11
-    AttributeFontColor      #475569
-    ArrowColor              #64748b
-    ArrowFontSize           11
-    ArrowFontColor          #475569
-    StartColor              #1e293b
-    EndColor                #1e293b
-    CompositeBackgroundColor  #f1f5f9
-    CompositeBorderColor      #94a3b8
+    BackgroundColor    #f8fafc
+    BorderColor        #94a3b8
+    FontColor          #1e293b
+    AttributeFontSize  11
+    AttributeFontColor #475569
+    ArrowColor         #64748b
+    ArrowFontSize      11
+    ArrowFontColor     #475569
+    StartColor         #1e293b
+    EndColor           #1e293b
 }
 
 [*] --> Boot
