@@ -52,6 +52,7 @@
 #define PID_RESCAN_INTERVAL_SEC   2
 #define USB_SCAN_INTERVAL_SEC     5   // fallback poll interval if inotify unavailable
 #define SYNC_INTERVAL_SEC         5   // sync thread wake interval (poll timeout)
+#define USB_DEBOUNCE_SEC          5   // wait after IN_UNMOUNT before declaring USB gone
 #define SYNC_CHUNK_SIZE       65536   // max bytes per file per sync cycle (64 KB)
 
 #define OUTPUT_ROOT "/data/media/0/LogDaemon"
@@ -507,8 +508,31 @@ static void *sync_thread_func(void *arg) {
                 : (sleep(SYNC_INTERVAL_SEC), 0);
 
         if (r > 0) {
-            // inotify fired — USB unmounted, deleted, or moved.
-            LOGI("Sync: USB event on %s — stopping capture", sa->usb_root);
+            // inotify fired — could be a real ejection or a temporary vold
+            // remount during an Android profile switch. Drain the event buffer,
+            // wait USB_DEBOUNCE_SEC, then check whether log.sinfo is accessible.
+            char evbuf[sizeof(struct inotify_event) + NAME_MAX + 1];
+            read(ifd, evbuf, sizeof(evbuf));
+
+            LOGI("Sync: USB event on %s — debouncing %ds",
+                 sa->usb_root, USB_DEBOUNCE_SEC);
+            sleep(USB_DEBOUNCE_SEC);
+
+            char sinfo[600];
+            snprintf(sinfo, sizeof(sinfo), "%s/log.sinfo", sa->usb_root);
+            if (access(sinfo, R_OK) == 0) {
+                // USB is back — profile switch remounted it. Re-register the
+                // inotify watch (IN_UNMOUNT invalidates the old descriptor)
+                // and continue the session without interruption.
+                LOGI("Sync: USB remounted after profile switch — continuing session");
+                inotify_add_watch(ifd, sa->usb_root,
+                                  IN_UNMOUNT | IN_DELETE_SELF | IN_MOVE_SELF);
+                continue;
+            }
+
+            // Still gone after debounce — real USB ejection.
+            LOGI("Sync: USB gone after %ds debounce — stopping capture",
+                 USB_DEBOUNCE_SEC);
             g_usb_gone = 1;
             if (g_state.logcat_pid > 0)
                 kill(g_state.logcat_pid, SIGTERM);
