@@ -5,19 +5,20 @@
 // Two-thread design:
 //   Main thread  — reads logcat pipe, filters by PID/package, writes to
 //                  internal storage. Never touches USB during capture.
-//   Sync thread  — every SYNC_INTERVAL_SEC: checks USB presence, streams
-//                  new bytes from internal storage to USB in chunks.
-//                  Sets g_usb_gone and kills logcat child when USB is gone,
-//                  which unblocks the main thread cleanly.
+//   Sync thread  — wakes every SYNC_INTERVAL_SEC: streams new bytes from
+//                  internal storage to USB in 64 KB chunks. Uses inotify
+//                  on the USB root path to detect ejection instantly —
+//                  no polling, no miss counter.
 //
 // Flow:
-//   1. Scan /mnt/media_rw/ for USB drive with log.sinfo
-//   2. Read config (file closed immediately — no persistent USB handle)
-//   3. Create session dir on internal storage
-//   4. Spawn sync thread (passes immutable session params)
-//   5. Main thread: logcat → filter → write internal storage (uninterrupted)
-//   6. Sync thread: every 5s sync chunks to USB, check USB still present
-//   7. USB ejected → sync thread sets g_usb_gone, kills logcat child
+//   1. Watch /mnt/media_rw/ via inotify for IN_CREATE (USB mount)
+//   2. find_usb() checks for log.sinfo; if absent go back to step 1
+//   3. Read config (file closed immediately — no persistent USB handle)
+//   4. Create session dir on internal storage
+//   5. Spawn sync thread (passes immutable session params + inotify fd)
+//   6. Main thread: logcat → filter → write internal storage (uninterrupted)
+//   7. Sync thread: every 5s sync chunks to USB; inotify fires instantly
+//      on IN_UNMOUNT/IN_DELETE_SELF → sets g_usb_gone, kills logcat child
 //   8. Main thread fgets() returns EOF → session ends
 //   9. Join sync thread (final flush attempt) → reset → back to step 1
 
@@ -36,6 +37,8 @@
 #include <time.h>
 #include <errno.h>
 #include <ctype.h>
+#include <poll.h>
+#include <sys/inotify.h>
 #include <android/log.h>
 
 #define TAG "LogDaemon"
@@ -47,9 +50,8 @@
 #define MAX_PIDS_PER_PKG          8
 #define MAX_LINE               8192
 #define PID_RESCAN_INTERVAL_SEC   2
-#define USB_SCAN_INTERVAL_SEC     5
-#define SYNC_INTERVAL_SEC         5   // how often sync thread checks USB + streams chunks
-#define USB_MISS_MAX              3   // consecutive misses before declaring USB gone (3×5 = 15s)
+#define USB_SCAN_INTERVAL_SEC     5   // fallback poll interval if inotify unavailable
+#define SYNC_INTERVAL_SEC         5   // sync thread wake interval (poll timeout)
 #define SYNC_CHUNK_SIZE       65536   // max bytes per file per sync cycle (64 KB)
 
 #define OUTPUT_ROOT "/data/media/0/LogDaemon"
@@ -101,6 +103,17 @@ static void sigterm_handler(int sig) {
 }
 
 // ── USB discovery ─────────────────────────────────────────────────────────────
+
+// Block until inotify reports a new entry in /mnt/media_rw/ (USB mount).
+// Polls in 1 s slices so SIGTERM (g_running=0) is noticed promptly.
+static void wait_for_usb_mount(int ifd) {
+    char buf[sizeof(struct inotify_event) + NAME_MAX + 1];
+    struct pollfd pfd = { .fd = ifd, .events = POLLIN };
+    while (g_running) {
+        int r = poll(&pfd, 1, 1000);
+        if (r > 0) { read(ifd, buf, sizeof(buf)); break; }
+    }
+}
 
 static int find_usb(void) {
     DIR *d = opendir("/mnt/media_rw");
@@ -469,38 +482,50 @@ static void sync_all_packages(const SyncArgs *sa) {
 
 static void *sync_thread_func(void *arg) {
     SyncArgs *sa = (SyncArgs *)arg;
-    int miss = 0;
 
     makedirs(sa->usb_session);
     LOGI("Sync thread started → USB: %s", sa->usb_session);
 
+    // Watch the USB root for unmount or deletion — fires the instant vold
+    // removes the volume, with no polling or miss counter needed.
+    int ifd = inotify_init1(IN_CLOEXEC);
+    if (ifd >= 0) {
+        inotify_add_watch(ifd, sa->usb_root,
+                          IN_UNMOUNT | IN_DELETE_SELF | IN_MOVE_SELF);
+        LOGD("Sync: inotify watching %s", sa->usb_root);
+    } else {
+        LOGE("Sync: inotify_init failed (%s) — falling back to stat polling",
+             strerror(errno));
+    }
+
+    struct pollfd pfd = { .fd = ifd, .events = POLLIN };
+
     while (g_running && !g_usb_gone) {
-        sleep(SYNC_INTERVAL_SEC);
+        // Block for up to SYNC_INTERVAL_SEC; wake early on USB event.
+        int r = (ifd >= 0)
+                ? poll(&pfd, 1, SYNC_INTERVAL_SEC * 1000)
+                : (sleep(SYNC_INTERVAL_SEC), 0);
+
+        if (r > 0) {
+            // inotify fired — USB unmounted, deleted, or moved.
+            LOGI("Sync: USB event on %s — stopping capture", sa->usb_root);
+            g_usb_gone = 1;
+            if (g_state.logcat_pid > 0)
+                kill(g_state.logcat_pid, SIGTERM);
+            break;
+        }
+
         if (!g_running) break;
 
-        // Check USB presence
-        struct stat st;
-        if (stat(sa->usb_root, &st) < 0 || !S_ISDIR(st.st_mode)) {
-            miss++;
-            LOGD("Sync: USB miss %d/%d", miss, USB_MISS_MAX);
-            if (miss >= USB_MISS_MAX) {
-                LOGI("Sync: USB gone after %ds — stopping capture",
-                     miss * SYNC_INTERVAL_SEC);
-                g_usb_gone = 1;
-                // Unblock main thread's fgets()
-                if (g_state.logcat_pid > 0)
-                    kill(g_state.logcat_pid, SIGTERM);
-                break;
-            }
-            continue;  // skip sync this cycle, USB may be in transition
-        }
-        miss = 0;
-
+        // r == 0: timeout — SYNC_INTERVAL_SEC elapsed, stream next chunk.
+        // r <  0: poll interrupted (EINTR from signal) — still sync then loop.
         sync_all_packages(sa);
     }
 
-    // Final flush: attempt to sync remaining bytes before thread exits.
-    // If USB is gone this is a no-op (fopen on USB path fails silently).
+    if (ifd >= 0) close(ifd);
+
+    // Final flush: sync any bytes written after the last cycle.
+    // fopen on a gone USB path fails silently — no-op if already ejected.
     sync_all_packages(sa);
     LOGI("Sync thread exiting");
     return NULL;
@@ -647,10 +672,25 @@ int main(void) {
     makedirs(OUTPUT_ROOT);
     LOGI("Output root: %s", OUTPUT_ROOT);
 
+    // Watch /mnt/media_rw/ for new subdirectories (= USB volume mounted by vold).
+    // Falls back to sleep-poll if inotify is unavailable.
+    int usb_ifd = inotify_init1(IN_CLOEXEC);
+    if (usb_ifd >= 0) {
+        inotify_add_watch(usb_ifd, "/mnt/media_rw", IN_CREATE);
+        LOGI("Watching /mnt/media_rw for USB mount events");
+    } else {
+        LOGE("inotify_init for /mnt/media_rw failed (%s) — using polling",
+             strerror(errno));
+    }
+
     while (g_running) {
         if (!find_usb()) {
-            LOGD("No USB with log.sinfo — retrying in %ds", USB_SCAN_INTERVAL_SEC);
-            sleep(USB_SCAN_INTERVAL_SEC);
+            if (usb_ifd >= 0) {
+                LOGD("Waiting for USB mount event on /mnt/media_rw ...");
+                wait_for_usb_mount(usb_ifd);
+            } else {
+                sleep(USB_SCAN_INTERVAL_SEC);
+            }
             continue;
         }
 
@@ -669,6 +709,7 @@ int main(void) {
         reset_state();
     }
 
+    if (usb_ifd >= 0) close(usb_ifd);
     LOGI("logdaemon exiting");
     return 0;
 }
