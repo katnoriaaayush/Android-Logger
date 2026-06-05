@@ -688,11 +688,21 @@ int main(void) {
             if (usb_ifd >= 0) {
                 LOGD("Waiting for USB mount event on /mnt/media_rw ...");
                 wait_for_usb_mount(usb_ifd);
+                if (!g_running) break;
+                // IN_CREATE fires when vold creates the UUID directory, but the
+                // FAT filesystem may not be accessible yet. Poll for up to 10 s
+                // so find_usb() does not fail and re-block on inotify.
+                for (int i = 0; i < 10 && g_running; i++) {
+                    sleep(1);
+                    if (find_usb()) goto session_ready;
+                }
+                LOGD("USB mounted but log.sinfo not found — waiting for next event");
             } else {
                 sleep(USB_SCAN_INTERVAL_SEC);
             }
             continue;
         }
+        session_ready:
 
         if (parse_config() < 0 || g_state.package_count == 0) {
             LOGE("Config invalid or no packages");
