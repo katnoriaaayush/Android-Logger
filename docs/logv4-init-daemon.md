@@ -28,63 +28,55 @@ skinparam defaultFontSize 12
 skinparam backgroundColor #ffffff
 
 skinparam state {
-    BackgroundColor    #f8fafc
-    BorderColor        #94a3b8
-    FontColor          #1e293b
-    AttributeFontSize  11
-    AttributeFontColor #475569
-    ArrowColor         #64748b
-    ArrowFontSize      11
-    ArrowFontColor     #475569
-    StartColor         #1e293b
-    EndColor           #1e293b
+    BackgroundColor #f8fafc
+    BorderColor     #94a3b8
 }
 
 [*] --> Boot
 
-state "  1 · Boot  " as Boot #dbeafe / #bfdbfe {
-    Boot : Daemon started by **init**
-    Boot : Runs as  uid = 0  (root)
-    Boot : Waits for  sys.boot_completed = 1
+state "1 - Boot" as Boot #dbeafe {
+    Boot : Daemon started by init
+    Boot : Runs as uid = 0 (root)
+    Boot : Waits for sys.boot_completed = 1
 }
 
-state "  2 · USB Detection  " as Detect #ede9fe / #ddd6fe {
+state "2 - USB Detection" as Detect #ede9fe {
     Detect : inotify watches /mnt/media_rw/ for IN_CREATE
-    Detect : Finds log.sinfo  →  reads package list + options
-    Detect : File closed immediately — no USB handle retained
+    Detect : Finds log.sinfo -> reads package list + options
+    Detect : File closed immediately - no USB handle retained
 }
 
-state "  3 · Session Start  " as Start #dcfce7 / #bbf7d0 {
-    Start : Creates  /data/media/0/LogDaemon/logs/<ts>/
-    Start : Opens  .log  and  .tsv  writers per package
+state "3 - Session Start" as Start #dcfce7 {
+    Start : Creates /data/media/0/LogDaemon/logs/[ts]/
+    Start : Opens .log and .tsv writers per package
     Start : Spawns sync thread
-    Start : Forks  logcat -T <last_ts>  as root
+    Start : Forks logcat -T [last_ts] as root
 }
 
-state "  4 · Active Session  " as Active {
+state "4 - Active Session" as Active {
 
-    state "  Main Thread  " as Main #d1fae5 / #a7f3d0 {
-        Main : Reads logcat pipe  (root — all user profiles)
-        Main : Parses line  →  matches PID to package
-        Main : Writes  .log  /  .tsv  to internal storage
-        Main : Checkpoints  .last_ts  every 64 lines
+    state "Main Thread" as Main #d1fae5 {
+        Main : Reads logcat pipe (root - all user profiles)
+        Main : Parses line -> matches PID to package
+        Main : Writes .log / .tsv to internal storage
+        Main : Checkpoints .last_ts every 64 lines
     }
 
     --
 
-    state "  Sync Thread  " as Sync #fef9c3 / #fde68a {
-        Sync : poll() — 5 s timeout or inotify event
+    state "Sync Thread" as Sync #fef9c3 {
+        Sync : poll() - 5 s timeout or inotify event
         Sync : inotify watches USB root for IN_UNMOUNT
-        Sync : Reads offset  →  streams 64 KB chunk to USB
-        Sync : open  →  fwrite  →  close  per cycle
-        Sync : IN_UNMOUNT + 5 s debounce  →  signals USB gone
+        Sync : Reads offset -> streams 64 KB chunk to USB
+        Sync : open -> fwrite -> close per cycle
+        Sync : IN_UNMOUNT + 5 s debounce -> signals USB gone
     }
 
 }
 
-state "  5 · Session End  " as End #ffedd5 / #fed7aa {
-    End : g_usb_gone = 1  →  capture loop exits
-    End : Writers closed  ·  _summary.tsv written
+state "5 - Session End" as End #ffedd5 {
+    End : g_usb_gone = 1 -> capture loop exits
+    End : Writers closed - _summary.tsv written
     End : Sync thread performs final USB flush
     End : init restarts daemon after 5 s
 }
@@ -238,7 +230,7 @@ start
 :init starts logdaemon (uid=0);
 
 repeat
-  :inotify IN_CREATE on /mnt/media_rw/\n→ poll find_usb() until log.sinfo found;
+  :inotify IN_CREATE on /mnt/media_rw/\npoll find_usb() until log.sinfo found;
 
   if (log.sinfo found?) then (yes)
 
@@ -248,12 +240,12 @@ repeat
       No USB handle kept open.
     end note
 
-    :Create session directory\n/data/media/0/LogDaemon/logs/<ts>/;
-    :Open writers: <pkg>.log + <pkg>.log.tsv;
+    :Create session directory\n/data/media/0/LogDaemon/logs/[ts]/;
+    :Open writers: [pkg].log + [pkg].log.tsv;
 
     fork
-      :**Main Thread**;
-      :Check .last_ts → spawn logcat\n-T <timestamp> *:D (root);
+      :Main Thread;
+      :Check .last_ts - spawn logcat\n-T [timestamp] (root);
       note right
         logd delivers entries from
         ALL user profiles to root.
@@ -262,18 +254,18 @@ repeat
       repeat
         :Read line from logcat pipe;
         :Parse: date time pid tid level tag msg;
-        :Scan /proc — match PID to package\n(sees all users' processes);
+        :Scan /proc - match PID to package\n(sees all users processes);
         if (PID matches?) then (yes)
           :Write to internal .log + .tsv;
           if (every 64 lines) then (yes)
             :fflush();
-            :Save timestamp → .last_ts;
+            :Save timestamp -> .last_ts;
           endif
         endif
       repeat while (g_running AND NOT g_usb_gone)
 
     fork again
-      :**Sync Thread**;
+      :Sync Thread;
       note right
         inotify watches USB root
         for IN_UNMOUNT.
@@ -282,12 +274,12 @@ repeat
       end note
 
       repeat
-        :poll() — 5 s timeout or inotify event;
+        :poll() - 5 s timeout or inotify event;
 
         if (inotify IN_UNMOUNT?) then (yes)
           :sleep 5 s debounce;
           if (log.sinfo accessible?) then (yes)
-            :Profile switch — re-register\ninotify watch, continue;
+            :Profile switch - re-register\ninotify watch, continue;
           else (no)
             :Set g_usb_gone = 1;
             :kill(logcat_pid, SIGTERM);
@@ -296,7 +288,7 @@ repeat
         else (timeout)
           repeat while (package in list)
             :Read new bytes from\ninternal .log at offset;
-            :open USB .log → write 64KB → close;
+            :open USB .log -> write 64KB -> close;
             :Update offset file;
           end repeat
         endif
@@ -312,7 +304,7 @@ repeat
     :write _summary.tsv;
 
   else (no)
-    :Block on inotify — wait\nfor next USB mount event;
+    :Block on inotify - wait\nfor next USB mount event;
   endif
 
 repeat while (g_running)
@@ -343,10 +335,10 @@ participant "Sync Thread" as sync
 participant "USB Drive" as usb
 
 init -> main : start logdaemon (uid = root)
-main -> usb  : open log.sinfo → read config → **close**
+main -> usb  : open log.sinfo -> read config -> close
 main -> stor : makedirs session dir\nopen writers
 main -> sync : pthread_create(sync_thread_func)
-main -> logd : fork logcat -T <last_ts>
+main -> logd : fork logcat -T [last_ts]
 
 loop Capture loop
   logd  -> main : log line (all user profiles)
@@ -356,9 +348,9 @@ loop Capture loop
 end
 
 loop Every 5s or on inotify event (sync thread, independent)
-  alt poll() timeout — 5 s sync interval
+  alt poll() timeout - 5 s sync interval
     sync -> stor : read chunk at offset
-    sync -> usb  : open → fwrite 64KB → close
+    sync -> usb  : open -> fwrite 64KB -> close
     note right of usb
       Handle open < 50 ms.
       vold never sees a
@@ -382,7 +374,7 @@ main  -> stor : close_writers()
 main  -> sync : pthread_join()
 sync  -> usb  : final flush attempt
 main  -> stor : write _summary.tsv
-main  -> init : exit → init restarts\nafter restart_period 5s
+main  -> init : exit -> init restarts\nafter restart_period 5s
 
 @enduml
 ```
