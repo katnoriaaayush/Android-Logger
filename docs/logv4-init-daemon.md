@@ -286,11 +286,11 @@ repeat
             break
           endif
         else (timeout)
-          repeat while (package in list)
+          while (package in list) is (yes)
             :Read new bytes from\ninternal .log at offset;
             :open USB .log -> write 64KB -> close;
             :Update offset file;
-          end repeat
+          endwhile (done)
         endif
 
       repeat while (g_running AND NOT g_usb_gone)
