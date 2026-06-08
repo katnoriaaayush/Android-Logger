@@ -49,7 +49,7 @@ state "  1 · Boot  " as Boot #dbeafe / #bfdbfe {
 }
 
 state "  2 · USB Detection  " as Detect #ede9fe / #ddd6fe {
-    Detect : Scans /mnt/media_rw/  every 5 s
+    Detect : inotify watches /mnt/media_rw/ for IN_CREATE
     Detect : Finds log.sinfo  →  reads package list + options
     Detect : File closed immediately — no USB handle retained
 }
@@ -73,11 +73,11 @@ state "  4 · Active Session  " as Active {
     --
 
     state "  Sync Thread  " as Sync #fef9c3 / #fde68a {
-        Sync : Wakes every 5 s
-        Sync : stat ( /mnt/media_rw/<uuid>/ )
+        Sync : poll() — 5 s timeout or inotify event
+        Sync : inotify watches USB root for IN_UNMOUNT
         Sync : Reads offset  →  streams 64 KB chunk to USB
         Sync : open  →  fwrite  →  close  per cycle
-        Sync : 3 consecutive misses  →  signals USB gone
+        Sync : IN_UNMOUNT + 5 s debounce  →  signals USB gone
     }
 
 }
@@ -93,7 +93,7 @@ Boot    -->  Detect  : boot_completed = 1
 Detect  -->  Detect  : log.sinfo not found
 Detect  -->  Start   : log.sinfo found
 Start   -->  Active  : threads running
-Active  -->  End     : USB ejected\n(3 consecutive misses)
+Active  -->  End     : USB ejected\n(IN_UNMOUNT + 5 s debounce)
 End     -up->  Detect  : restarted by init
 
 @enduml
@@ -110,7 +110,7 @@ The core process. Contains two logical threads:
 | Thread | Responsibility |
 |---|---|
 | **Main (capture)** | Reads from logcat pipe, matches PIDs to packages, writes to internal storage. Never touches USB after startup. |
-| **Sync** | Every 5 s: checks USB presence, streams new bytes from internal storage to USB in 64 KB chunks. Detects USB ejection and signals main thread to stop. |
+| **Sync** | Every 5 s: streams new bytes from internal storage to USB in 64 KB chunks. Watches the USB root via `inotify` (`IN_UNMOUNT`) — debounces 5 s to survive profile-switch remounts, then signals the main thread to stop on real ejection. |
 
 ### `/system/etc/init/logdaemon.rc` — Service Definition
 
@@ -194,11 +194,31 @@ The sync thread runs independently — the main thread's only job is `fgets → 
 
 ---
 
-### 8. Why a 3-miss debounce on USB detection?
+### 8. Why `inotify` instead of polling for USB events?
 
-During a profile switch, `/mnt/media_rw/<uuid>/` can briefly disappear while vold reconfigures storage for the new user. A single-check approach would falsely detect USB ejection during this transient gap and stop the session.
+The previous design polled `stat(/mnt/media_rw/<uuid>/)` every 5 seconds to detect USB ejection, and watched for `log.sinfo` by scanning `/mnt/media_rw/` on the same interval.
 
-Requiring 3 consecutive failed checks (15 seconds of absence) ensures that only a real, sustained USB removal or ejection stops capture. A transient gap that resolves within 15 seconds resets the counter and capture continues uninterrupted.
+`inotify` eliminates both polls:
+
+| Event | Trigger | Action |
+|---|---|---|
+| `IN_CREATE` on `/mnt/media_rw/` | vold creates a UUID directory (USB mount) | Wake `find_usb()` immediately |
+| `IN_UNMOUNT` on USB root | vold unmounts the volume | Start debounce check |
+
+The main loop blocks in `poll()` on the inotify fd instead of sleeping — USB detection is now instant rather than up to 5 seconds delayed. The sync thread uses the same `poll()` call with a 5-second timeout, so the sync cadence is unchanged while ejection response is immediate.
+
+---
+
+### 9. Why a 5-second debounce on `IN_UNMOUNT`?
+
+`IN_UNMOUNT` fires on **any** unmount of the watched path — including the temporary remount vold performs during an Android profile switch. Without debouncing, every profile switch would stop the capture session and start a new one.
+
+After `IN_UNMOUNT` fires, the sync thread sleeps 5 seconds then checks whether `log.sinfo` is still accessible on the USB path:
+
+- **Accessible** → vold completed a profile-switch remount; re-register the inotify watch and continue the existing session.
+- **Not accessible** → real ejection; set `g_usb_gone` and stop capture.
+
+The 5-second wait covers the typical vold remount window during profile switches.
 
 ---
 
@@ -218,7 +238,7 @@ start
 :init starts logdaemon (uid=0);
 
 repeat
-  :Scan /mnt/media_rw/ for USB\ncontaining log.sinfo;
+  :inotify IN_CREATE on /mnt/media_rw/\n→ poll find_usb() until log.sinfo found;
 
   if (log.sinfo found?) then (yes)
 
@@ -254,25 +274,31 @@ repeat
 
     fork again
       :**Sync Thread**;
+      note right
+        inotify watches USB root
+        for IN_UNMOUNT.
+        poll() blocks until event
+        or 5 s timeout.
+      end note
 
       repeat
-        :sleep 5s;
-        :stat(/mnt/media_rw/<uuid>/);
+        :poll() — 5 s timeout or inotify event;
 
-        if (USB present?) then (yes)
-          :Reset miss counter;
+        if (inotify IN_UNMOUNT?) then (yes)
+          :sleep 5 s debounce;
+          if (log.sinfo accessible?) then (yes)
+            :Profile switch — re-register\ninotify watch, continue;
+          else (no)
+            :Set g_usb_gone = 1;
+            :kill(logcat_pid, SIGTERM);
+            break
+          endif
+        else (timeout)
           repeat while (package in list)
             :Read new bytes from\ninternal .log at offset;
             :open USB .log → write 64KB → close;
             :Update offset file;
           end repeat
-        else (no)
-          :Increment miss counter;
-          if (miss ≥ 3 ?) then (yes)
-            :Set g_usb_gone = 1;
-            :kill(logcat_pid, SIGTERM);
-            break
-          endif
         endif
 
       repeat while (g_running AND NOT g_usb_gone)
@@ -286,7 +312,7 @@ repeat
     :write _summary.tsv;
 
   else (no)
-    :sleep 5s;
+    :Block on inotify — wait\nfor next USB mount event;
   endif
 
 repeat while (g_running)
@@ -329,9 +355,8 @@ loop Capture loop
   main  -> stor : checkpoint .last_ts\n(every 64 lines)
 end
 
-loop Every 5s (sync thread, independent)
-  sync -> usb  : stat(usb_root)
-  alt USB present
+loop Every 5s or on inotify event (sync thread, independent)
+  alt poll() timeout — 5 s sync interval
     sync -> stor : read chunk at offset
     sync -> usb  : open → fwrite 64KB → close
     note right of usb
@@ -340,9 +365,15 @@ loop Every 5s (sync thread, independent)
       persistent holder.
     end note
     sync -> stor : update .offset file
-  else USB miss ≥ 3
-    sync -> main : g_usb_gone = 1
-    sync -> logd : kill(logcat_pid, SIGTERM)
+  else inotify IN_UNMOUNT fires
+    sync -> sync : sleep 5 s debounce
+    sync -> usb  : access(log.sinfo)
+    alt log.sinfo accessible (profile switch)
+      sync -> sync : re-register inotify watch\ncontinue session
+    else not accessible (real ejection)
+      sync -> main : g_usb_gone = 1
+      sync -> logd : kill(logcat_pid, SIGTERM)
+    end
   end
 end
 
@@ -366,8 +397,7 @@ Logs are **never written directly to USB**. USB is used only as a mirror, synced
 
 1. **Main thread** writes all logs continuously to internal storage `/data/media/0/LogDaemon/logs/<session>/`
 
-2. **Sync thread** wakes every 5 seconds and:
-   - Checks USB presence via `stat(/mnt/media_rw/<uuid>/)`
+2. **Sync thread** wakes every 5 seconds (or immediately on an inotify event) and:
    - Reads the current byte offset from `.sync/<session>/<pkg>_log.off`
    - Opens the internal `.log`, reads a 64 KB chunk from that offset
    - Opens the USB `.log`, writes the chunk, closes immediately
@@ -422,4 +452,4 @@ com.other.package
 min_level=D
 ```
 
-Place this file at the root of the USB drive. The daemon scans for it every 5 seconds on startup. Removing it (or the USB drive) stops the current session.
+Place this file at the root of the USB drive. The daemon watches `/mnt/media_rw/` via `inotify` and detects the USB mount instantly when vold creates the volume directory. Ejecting the USB drive stops the current session.
