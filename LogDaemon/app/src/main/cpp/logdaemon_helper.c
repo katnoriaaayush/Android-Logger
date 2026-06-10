@@ -39,6 +39,9 @@
 #include <ctype.h>
 #include <poll.h>
 #include <sys/inotify.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <netdb.h>
 #include <android/log.h>
 
 #define TAG "LogDaemon"
@@ -54,6 +57,7 @@
 #define SYNC_INTERVAL_SEC         5   // sync thread wake interval (poll timeout)
 #define USB_DEBOUNCE_SEC          5   // wait after IN_UNMOUNT before declaring USB gone
 #define SYNC_CHUNK_SIZE       65536   // max bytes per file per sync cycle (64 KB)
+#define UPLOAD_TIMEOUT_SEC       10   // socket connect/send/recv timeout for server upload
 
 #define OUTPUT_ROOT "/data/media/0/LogDaemon"
 #define RESUME_FILE "/data/media/0/LogDaemon/.last_ts"
@@ -76,6 +80,7 @@ typedef struct {
     Package packages[MAX_PACKAGES];
     int     package_count;
     char    min_level;
+    char    upload_url[512];   // from log.sinfo [options] upload_url= (empty = no upload)
     pid_t   logcat_pid;
     int     logcat_fd;
 } State;
@@ -88,6 +93,12 @@ typedef struct {
     char sync_dir[512];       // /data/media/0/LogDaemon/.sync/<ts>
     int  pkg_count;
     char pkg_names[MAX_PACKAGES][128];
+    // server upload (optional — parsed from State.upload_url at session start)
+    int  upload_enabled;
+    char upload_host[256];
+    int  upload_port;
+    char upload_path[256];
+    char session_id[64];      // session dir basename, sent as query param
 } SyncArgs;
 
 static State        g_state    = {0};
@@ -188,9 +199,16 @@ static int parse_config(void) {
         }
         if (in_options && strncmp(p, "min_level=", 10) == 0)
             g_state.min_level = (char)toupper((unsigned char)p[10]);
+        if (in_options && strncmp(p, "upload_url=", 11) == 0) {
+            strncpy(g_state.upload_url, p + 11, sizeof(g_state.upload_url) - 1);
+            g_state.upload_url[sizeof(g_state.upload_url) - 1] = 0;
+        }
     }
     fclose(f);
-    LOGI("Config: %d package(s), min_level=%c", g_state.package_count, g_state.min_level);
+    LOGI("Config: %d package(s), min_level=%c%s%s",
+         g_state.package_count, g_state.min_level,
+         g_state.upload_url[0] ? ", upload=" : "",
+         g_state.upload_url[0] ? g_state.upload_url : "");
     return 0;
 }
 
@@ -260,6 +278,7 @@ static void reset_state(void) {
     }
     g_state.usb_root[0]    = 0;
     g_state.session_dir[0] = 0;
+    g_state.upload_url[0]  = 0;
     g_state.package_count  = 0;
     g_usb_gone             = 0;
     for (int i = 0; i < MAX_PACKAGES; i++)
@@ -481,6 +500,162 @@ static void sync_all_packages(const SyncArgs *sa) {
     }
 }
 
+// ── server upload (plain HTTP POST over raw socket — no curl, no TLS) ──────────
+
+// Parse "http://host[:port][/path]" into components. http only.
+static int parse_upload_url(const char *url, char *host, size_t host_sz,
+                            int *port, char *path, size_t path_sz) {
+    if (strncmp(url, "http://", 7) != 0) return -1;
+    const char *p = url + 7;
+
+    const char *hs = p;
+    while (*p && *p != ':' && *p != '/') p++;
+    size_t hl = (size_t)(p - hs);
+    if (hl == 0 || hl >= host_sz) return -1;
+    memcpy(host, hs, hl); host[hl] = 0;
+
+    *port = 80;
+    if (*p == ':') {
+        *port = atoi(++p);
+        while (*p && *p != '/') p++;
+    }
+    if (*p == '/') { strncpy(path, p,   path_sz - 1); path[path_sz - 1] = 0; }
+    else           { strncpy(path, "/", path_sz - 1); path[path_sz - 1] = 0; }
+
+    return (*port > 0 && *port <= 65535) ? 0 : -1;
+}
+
+static int send_all(int fd, const char *buf, size_t len) {
+    size_t sent = 0;
+    while (sent < len) {
+        ssize_t n = send(fd, buf + sent, len - sent, MSG_NOSIGNAL);
+        if (n <= 0) return -1;
+        sent += (size_t)n;
+    }
+    return 0;
+}
+
+// POST `body` to host:port + path_q. Returns 0 on HTTP 2xx, -1 otherwise.
+static int http_post_chunk(const char *host, int port, const char *path_q,
+                           const char *body, size_t body_len) {
+    struct addrinfo hints, *res = NULL;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family   = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+
+    char portstr[16];
+    snprintf(portstr, sizeof(portstr), "%d", port);
+    if (getaddrinfo(host, portstr, &hints, &res) != 0) return -1;
+
+    int fd = -1;
+    for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
+        fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (fd < 0) continue;
+        struct timeval tv = { .tv_sec = UPLOAD_TIMEOUT_SEC, .tv_usec = 0 };
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+        if (connect(fd, ai->ai_addr, ai->ai_addrlen) == 0) break;
+        close(fd); fd = -1;
+    }
+    freeaddrinfo(res);
+    if (fd < 0) return -1;
+
+    char header[1024];
+    int hlen = snprintf(header, sizeof(header),
+        "POST %s HTTP/1.1\r\n"
+        "Host: %s:%d\r\n"
+        "Content-Type: application/octet-stream\r\n"
+        "Content-Length: %zu\r\n"
+        "Connection: close\r\n\r\n",
+        path_q, host, port, body_len);
+    if (hlen <= 0 || hlen >= (int)sizeof(header)) { close(fd); return -1; }
+
+    if (send_all(fd, header, (size_t)hlen) < 0)       { close(fd); return -1; }
+    if (body_len && send_all(fd, body, body_len) < 0) { close(fd); return -1; }
+
+    char resp[256];
+    ssize_t n = recv(fd, resp, sizeof(resp) - 1, 0);
+    close(fd);
+    if (n <= 0) return -1;
+    resp[n] = 0;
+
+    int code = 0;
+    if (sscanf(resp, "HTTP/%*s %d", &code) != 1) return -1;
+    return (code >= 200 && code < 300) ? 0 : -1;
+}
+
+// Stream all new bytes of src_path to the server, resuming from off_path.
+// Offset only advances on a confirmed 2xx, so failures are retried next cycle.
+// Returns 0 if fully uploaded (or already up to date), -1 if a POST failed.
+static int upload_one_file(const SyncArgs *sa, const char *src_path,
+                           const char *off_path, const char *label) {
+    long offset = 0;
+    { FILE *f = fopen(off_path, "r"); if (f) { fscanf(f, "%ld", &offset); fclose(f); } }
+
+    struct stat st;
+    if (stat(src_path, &st) != 0) return 0;     // file not created yet
+    long fsize = (long)st.st_size;
+    if (offset >= fsize) return 0;              // nothing new
+
+    FILE *src = fopen(src_path, "r");
+    if (!src) return -1;
+
+    char buf[SYNC_CHUNK_SIZE];
+    int result = 0;
+    while (offset < fsize) {
+        if (fseek(src, offset, SEEK_SET) != 0) { result = -1; break; }
+        size_t want = (size_t)(fsize - offset);
+        if (want > sizeof(buf)) want = sizeof(buf);
+        size_t n = fread(buf, 1, want, src);
+        if (n == 0) break;
+
+        char path_q[800];
+        snprintf(path_q, sizeof(path_q), "%s?session=%s&file=%s&offset=%ld",
+                 sa->upload_path, sa->session_id, label, offset);
+
+        if (http_post_chunk(sa->upload_host, sa->upload_port, path_q, buf, n) != 0) {
+            result = -1;            // leave offset unchanged — retried next cycle
+            break;
+        }
+        offset += (long)n;
+        FILE *of = fopen(off_path, "w");
+        if (of) { fprintf(of, "%ld\n", offset); fclose(of); }
+    }
+    fclose(src);
+    return result;
+}
+
+// Upload .log and .log.tsv for every package. Returns -1 if any file failed.
+static int upload_all_to_server(const SyncArgs *sa) {
+    int status = 0;
+    for (int i = 0; i < sa->pkg_count; i++) {
+        char src[600], off[600], label[300];
+
+        snprintf(src,   sizeof(src),   "%s/%s.log",         sa->session_dir, sa->pkg_names[i]);
+        snprintf(off,   sizeof(off),   "%s/%s_log.srv.off", sa->sync_dir,    sa->pkg_names[i]);
+        snprintf(label, sizeof(label), "%s.log",            sa->pkg_names[i]);
+        if (upload_one_file(sa, src, off, label) != 0) status = -1;
+
+        snprintf(src,   sizeof(src),   "%s/%s.log.tsv",     sa->session_dir, sa->pkg_names[i]);
+        snprintf(off,   sizeof(off),   "%s/%s_tsv.srv.off", sa->sync_dir,    sa->pkg_names[i]);
+        snprintf(label, sizeof(label), "%s.log.tsv",        sa->pkg_names[i]);
+        if (upload_one_file(sa, src, off, label) != 0) status = -1;
+    }
+    return status;
+}
+
+// Post an Android notification via `cmd notification post` (root, no APK).
+static void notify(const char *title, const char *message) {
+    pid_t pid = fork();
+    if (pid == 0) {
+        execl("/system/bin/cmd", "cmd", "notification", "post",
+              "-S", "bigtext", "-n", "4", "-t", title,
+              "logdaemon", message, NULL);
+        _exit(127);
+    }
+    if (pid > 0) waitpid(pid, NULL, 0);
+}
+
 static void *sync_thread_func(void *arg) {
     SyncArgs *sa = (SyncArgs *)arg;
 
@@ -544,13 +719,18 @@ static void *sync_thread_func(void *arg) {
         // r == 0: timeout — SYNC_INTERVAL_SEC elapsed, stream next chunk.
         // r <  0: poll interrupted (EINTR from signal) — still sync then loop.
         sync_all_packages(sa);
+        if (sa->upload_enabled) upload_all_to_server(sa);  // stream to server too
     }
 
     if (ifd >= 0) close(ifd);
 
     // Final flush: sync any bytes written after the last cycle.
     // fopen on a gone USB path fails silently — no-op if already ejected.
+    // The server stays reachable over the network after USB ejection, so this
+    // best-effort pass drains most remaining bytes; run_session() does the
+    // authoritative final pass (post close_writers) that drives the notification.
     sync_all_packages(sa);
+    if (sa->upload_enabled) upload_all_to_server(sa);
     LOGI("Sync thread exiting");
     return NULL;
 }
@@ -568,6 +748,8 @@ static void write_session_meta(time_t start_time) {
     strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &tm);
     fprintf(f, "session_start=%s\nlogv4=1\nuid=%d\npid=%d\nmin_level=%c\nusb=%s\n",
             ts, getuid(), getpid(), g_state.min_level, g_state.usb_root);
+    if (g_state.upload_url[0])
+        fprintf(f, "upload_url=%s\n", g_state.upload_url);
     fprintf(f, "packages:\n");
     for (int i = 0; i < g_state.package_count; i++)
         fprintf(f, "  - %s\n", g_state.packages[i].name);
@@ -623,6 +805,22 @@ static void run_session(void) {
     snprintf(sa.sync_dir, sizeof(sa.sync_dir),
              "%s/.sync/%s", OUTPUT_ROOT, sbase);
     makedirs(sa.sync_dir);
+
+    // Server upload config (optional — from log.sinfo upload_url=)
+    strncpy(sa.session_id, sbase, sizeof(sa.session_id) - 1);
+    sa.upload_enabled = 0;
+    if (g_state.upload_url[0]) {
+        if (parse_upload_url(g_state.upload_url,
+                             sa.upload_host, sizeof(sa.upload_host),
+                             &sa.upload_port,
+                             sa.upload_path, sizeof(sa.upload_path)) == 0) {
+            sa.upload_enabled = 1;
+            LOGI("Upload target: %s:%d%s (session %s)",
+                 sa.upload_host, sa.upload_port, sa.upload_path, sa.session_id);
+        } else {
+            LOGE("Invalid upload_url, skipping upload: %s", g_state.upload_url);
+        }
+    }
 
     pthread_t sync_tid;
     if (pthread_create(&sync_tid, NULL, sync_thread_func, &sa) != 0) {
@@ -681,6 +879,21 @@ static void run_session(void) {
     pthread_join(sync_tid, NULL);
 
     write_summary(session_start, time(NULL));
+
+    // Authoritative final upload pass — runs after close_writers() has flushed
+    // every byte (including the last sub-64-line buffer) and after the sync
+    // thread has joined, so there is no concurrency on the offset files. Its
+    // result is the true "did the whole session reach the server" status.
+    if (sa.upload_enabled) {
+        int up = upload_all_to_server(&sa);
+        LOGI("Final upload result: %s", up == 0 ? "OK" : "FAILED");
+        if (up == 0)
+            notify("LogDaemon \xe2\x80\x94 Upload Complete",
+                   "Session logs uploaded to server successfully.");
+        else
+            notify("LogDaemon \xe2\x80\x94 Upload Failed",
+                   "Logs saved locally; server upload did not complete.");
+    }
 }
 
 // ── main ──────────────────────────────────────────────────────────────────────

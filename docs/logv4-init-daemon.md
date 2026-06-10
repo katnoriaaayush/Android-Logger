@@ -442,6 +442,60 @@ com.other.package
 
 [options]
 min_level=D
+upload_url=http://192.168.1.50:8080/upload
 ```
 
 Place this file at the root of the USB drive. The daemon watches `/mnt/media_rw/` via `inotify` and detects the USB mount instantly when vold creates the volume directory. Ejecting the USB drive stops the current session.
+
+| Option | Required | Meaning |
+|---|---|---|
+| `min_level` | No (default `D`) | Minimum logcat level captured (`V`/`D`/`I`/`W`/`E`/`F`). Passed to logcat as `*:<level>`. |
+| `upload_url` | No | If set, logs are streamed to this HTTP endpoint during the session and finalised on USB ejection. `http://` only — no TLS. Omit to disable upload. |
+
+---
+
+## Server Upload
+
+When `upload_url` is present in `log.sinfo`, the daemon mirrors each package's
+`.log` and `.log.tsv` to an HTTP server in addition to the USB and internal-storage
+copies. It is a third sync target layered on the existing offset mechanism — the
+capture path is untouched.
+
+### How it works
+
+1. At session start the daemon parses `upload_url` into host / port / path. `http://` only; invalid URLs are logged and skipped (capture still proceeds).
+2. The sync thread, on every 5 s cycle, streams newly written bytes to the server in 64 KB chunks alongside the USB sync. Each chunk is a `POST` carrying a byte `offset`, so the server writes it at the right position and retries are idempotent.
+3. A separate offset file per target (`<pkg>_log.srv.off`, `<pkg>_tsv.srv.off` under `.sync/<session>/`) tracks how many bytes have been confirmed uploaded. The offset advances only on an HTTP 2xx, so a failed or interrupted chunk is retried on the next cycle with no gap or duplication.
+4. On USB ejection the session ends. After the internal writers are flushed and closed, the main thread runs one **authoritative** final upload pass (no concurrency with the sync thread, every byte on disk) and then posts an Android notification:
+   - **Upload Complete** — every byte of every file reached the server.
+   - **Upload Failed** — the server was unreachable or a chunk failed; logs remain safe on internal storage and USB.
+
+The notification is posted via `cmd notification post` (root, no companion APK).
+
+### Request protocol
+
+```
+POST <path>?session=<session-id>&file=<pkg>.log&offset=<byte-offset>  HTTP/1.1
+Content-Type: application/octet-stream
+Content-Length: <chunk size>
+
+<raw chunk bytes>
+```
+
+A `2xx` response confirms the chunk; anything else (or a connection failure / 10 s timeout) leaves the offset unadvanced for retry.
+
+### Receiving server
+
+A zero-dependency reference server ships at `tools/upload_server.py`:
+
+```bash
+python3 tools/upload_server.py --port 8080
+```
+
+It writes each chunk at its declared offset under `uploads/<session>/<file>`, so
+the reassembled files are byte-identical to the internal copies. Point `upload_url`
+at the PC's LAN address (e.g. `http://192.168.1.50:8080/upload`); the phone and PC
+must share a network.
+
+> Only the per-package `.log` and `.log.tsv` are uploaded. `_summary.tsv` and
+> `_session.meta` remain on internal storage and USB only.
