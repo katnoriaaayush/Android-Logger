@@ -345,7 +345,6 @@ HTML_VIEWER = """\
   --bd:#38383a;--bhi:#0381fe;
   --tx:#ebebf5;--tx2:#98989f;--tx3:#636366;
   --blue:#0381fe;
-  /* Android Studio Logcat level palette */
   --Vc:#8e8e93;--Vt:#aeaeb2;--Vbg:rgba(142,142,147,.07);
   --Dc:#5b9aff;--Dt:#7eb2ff;--Dbg:rgba(91,154,255,.07);
   --Ic:#30d158;--It:#5dde7f;--Ibg:rgba(48,209,88,.07);
@@ -364,7 +363,7 @@ body{
 /* ── Top bar ── */
 #topbar{
   height:48px;background:var(--sf);border-bottom:1px solid var(--bd);
-  display:flex;align-items:center;gap:0;flex-shrink:0;padding:0 6px;
+  display:flex;align-items:center;flex-shrink:0;padding:0 6px;
 }
 .tb-back{
   display:flex;align-items:center;gap:5px;padding:6px 10px;border-radius:8px;
@@ -398,39 +397,7 @@ body{
          animation:blink 1.4s infinite;flex-shrink:0}
 .bd-badge{background:rgba(255,255,255,.05);color:var(--tx3);border-color:var(--bd)}
 
-/* ── Charts accordion ── */
-#charts-wrap{flex-shrink:0;border-bottom:1px solid var(--bd)}
-#ch-tog{
-  display:flex;align-items:center;gap:7px;width:100%;background:var(--sf);
-  border:none;border-bottom:1px solid var(--bd);cursor:pointer;
-  padding:6px 14px;color:var(--tx2);font-size:.68rem;font-weight:600;
-  letter-spacing:.06em;text-transform:uppercase;transition:background .15s;
-}
-#ch-tog:hover{background:var(--sf2)}
-#ch-tog svg{width:12px;height:12px;stroke:currentColor;fill:none;stroke-width:2;transition:transform .2s}
-#ch-tog.open svg{transform:rotate(180deg)}
-#ch-inner{display:none;padding:10px 12px;gap:10px;flex-direction:row;background:var(--sf)}
-#ch-inner.open{display:flex}
-.cc{background:var(--bg);border:1px solid var(--bd);border-radius:10px;padding:10px 14px;flex:1;min-width:0}
-.clbl{font-size:.58rem;color:var(--tx3);letter-spacing:.07em;text-transform:uppercase;
-      margin-bottom:8px;font-weight:600}
-.dr{display:flex;align-items:center;gap:8px;font-size:.63rem;padding:2px 4px;
-    border-radius:5px;cursor:pointer;transition:background .12s}
-.dr:hover{background:rgba(255,255,255,.05)}
-.dr.off{opacity:.32}
-.dlbl{width:10px;font-weight:800;text-align:center;font-size:.67rem}
-.dtrack{flex:1;height:5px;background:rgba(255,255,255,.08);border-radius:3px;overflow:hidden}
-.dfill{height:100%;border-radius:3px;transition:width .38s cubic-bezier(.4,0,.2,1)}
-.dcnt{width:44px;text-align:right;color:var(--tx3);font-variant-numeric:tabular-nums;font-size:.61rem}
-#tl-svg{width:100%;height:40px;cursor:crosshair;display:block}
-#tl-range{font-size:.58rem;color:var(--tx3);margin-bottom:5px}
-#tl-tip{
-  position:fixed;background:var(--sf);border:1px solid var(--bd);border-radius:8px;
-  padding:5px 11px;font-size:.68rem;color:var(--tx);pointer-events:none;
-  display:none;z-index:200;white-space:nowrap;box-shadow:0 4px 16px rgba(0,0,0,.4);
-}
-
-/* ── Controls toolbar (Logcat style) ── */
+/* ── Controls toolbar ── */
 #controls{
   height:38px;background:var(--sf);border-bottom:1px solid var(--bd);
   display:flex;align-items:center;flex-shrink:0;padding:0 8px;overflow-x:auto;gap:0;
@@ -447,7 +414,7 @@ body{
 }
 .ptab:hover{background:var(--sf2);color:var(--tx2)}
 .ptab.active{background:rgba(3,129,254,.14);color:#7ec8ff;border-color:rgba(3,129,254,.32)}
-.lchips{display:flex;align-items:center;gap:3px;padding:0 6px;flex-shrink:0}
+.lchips{display:flex;align-items:center;gap:3px;flex-shrink:0}
 .lc{
   font-size:.62rem;font-weight:800;letter-spacing:.05em;
   padding:2px 7px;border-radius:5px;cursor:pointer;text-transform:uppercase;
@@ -462,6 +429,8 @@ body{
 .lc-E.on{background:rgba(255,69,58,.18);color:var(--Et)}
 .lc-F.on{background:rgba(191,90,242,.18);color:var(--Ft)}
 .csep{width:1px;height:18px;background:var(--bd);margin:0 5px;flex-shrink:0}
+
+/* search */
 .sbox{
   display:flex;align-items:center;border:1px solid var(--bd);border-radius:7px;
   background:rgba(255,255,255,.04);overflow:hidden;transition:border-color .15s;flex-shrink:0;
@@ -471,7 +440,7 @@ body{
           margin-left:8px;flex-shrink:0}
 #search{
   background:transparent;border:none;outline:none;color:var(--tx);
-  font-size:.74rem;padding:4px 8px;width:170px;
+  font-size:.74rem;padding:4px 8px;width:155px;
 }
 #search::placeholder{color:var(--tx3)}
 #src-clr{
@@ -479,6 +448,36 @@ body{
   padding:4px 7px;font-size:.7rem;display:none;transition:color .12s;
 }
 #src-clr:hover{color:var(--tx)}
+
+/* tag filter */
+#tag-filter-box{
+  display:flex;align-items:center;gap:3px;flex-shrink:0;
+  border:1px solid var(--bd);border-radius:7px;
+  background:rgba(255,255,255,.04);padding:0 4px 0 8px;
+  transition:border-color .15s;height:26px;overflow-x:auto;overflow-y:hidden;
+  cursor:text;min-width:110px;
+}
+#tag-filter-box::-webkit-scrollbar{height:0}
+#tag-filter-box:focus-within{border-color:rgba(255,214,10,.45);background:rgba(255,214,10,.04)}
+#tag-filter-box > svg{width:12px;height:12px;stroke:var(--tx3);fill:none;stroke-width:1.8;flex-shrink:0}
+.tchip{
+  display:inline-flex;align-items:center;gap:2px;
+  background:rgba(255,214,10,.16);color:var(--Wt);
+  border:1px solid rgba(255,214,10,.28);border-radius:4px;
+  font-size:.58rem;font-weight:600;padding:1px 4px 1px 5px;white-space:nowrap;flex-shrink:0;
+}
+.tchip-x{
+  background:none;border:none;color:var(--Wt);cursor:pointer;
+  font-size:.68rem;padding:0 1px;line-height:1;opacity:.6;transition:opacity .12s;
+}
+.tchip-x:hover{opacity:1}
+#tag-input{
+  background:transparent;border:none;outline:none;color:var(--tx);
+  font-size:.72rem;padding:2px 4px;min-width:72px;flex-shrink:0;
+}
+#tag-input::placeholder{color:var(--tx3)}
+
+/* right section */
 .cr{margin-left:auto;display:flex;align-items:center;gap:6px;flex-shrink:0;padding-left:6px}
 .wbtn{
   background:transparent;border:1px solid var(--bd);border-radius:5px;
@@ -489,38 +488,51 @@ body{
 .wbtn.on{background:rgba(3,129,254,.14);color:#7ec8ff;border-color:rgba(3,129,254,.32)}
 #lcount{font-size:.67rem;color:var(--tx3);white-space:nowrap;font-variant-numeric:tabular-nums}
 
-/* ── Log table (Logcat DNA) ── */
-#log-wrap{flex:1;overflow-y:auto;overflow-x:auto}
+/* ── Log outer box ── */
+#log-outer{flex:1;overflow:hidden;padding:8px;display:flex;flex-direction:column}
+#log-wrap{
+  flex:1;overflow-y:auto;overflow-x:auto;
+  border:1px solid var(--bd);border-radius:10px;
+  background:rgba(255,255,255,.007);
+}
 #load-earlier{
   display:none;text-align:center;padding:7px;color:var(--blue);cursor:pointer;
   font-size:.7rem;border-bottom:1px solid var(--bd);background:var(--sf);
-  transition:background .12s;
+  border-radius:9px 9px 0 0;transition:background .12s;
 }
 #load-earlier:hover{background:var(--sf2)}
+
+/* ── Log table ── */
 table{
   width:100%;border-collapse:collapse;
   font-size:.71rem;font-family:ui-monospace,Consolas,'Courier New',monospace;
   table-layout:fixed;
 }
-/* column widths */
-col.c0{width:3px}   /* level accent bar */
-col.c1{width:112px} /* time */
-col.c2{width:56px}  /* pid */
-col.c3{width:24px}  /* level badge */
-col.c4{width:126px} /* tag */
-col.c5{width:auto}  /* message */
-col.c6{width:26px}  /* copy */
+col.c0{width:3px}
+col.c1{width:148px}
+col.c2{width:52px}
+col.c3{width:24px}
+col.c4{width:130px}
+col.c5{width:auto}
+col.c6{width:26px}
 thead th{
   position:sticky;top:0;z-index:10;background:var(--sf);
   padding:3px 6px;text-align:left;
   font-size:.57rem;color:var(--tx3);letter-spacing:.08em;
   text-transform:uppercase;font-weight:600;
   border-bottom:1px solid var(--bd);
+  user-select:none;white-space:nowrap;overflow:hidden;
 }
 thead th:first-child{padding:0}
-tbody tr:hover{filter:brightness(1.15)}
+/* resizable header — contains the drag handle */
+th.rsz{position:relative}
+.col-rsz{
+  position:absolute;right:0;top:0;bottom:0;width:6px;
+  cursor:col-resize;z-index:2;
+}
+.col-rsz:hover,.col-rsz.active{background:rgba(3,129,254,.5)}
+tbody tr:hover{filter:brightness(1.14)}
 tbody tr:hover .cpbtn{opacity:.65}
-/* 3-pixel left accent — the Logcat signature */
 td.bar{padding:0;width:3px;min-width:3px}
 tr.rV td.bar{background:var(--Vc)} tr.rD td.bar{background:var(--Dc)}
 tr.rI td.bar{background:var(--Ic)} tr.rW td.bar{background:var(--Wc)}
@@ -531,7 +543,6 @@ td{padding:2px 6px;border-bottom:1px solid rgba(255,255,255,.022);
    vertical-align:top;overflow:hidden}
 .ttime{color:var(--tx3);white-space:nowrap;text-overflow:ellipsis;overflow:hidden;font-size:.67rem}
 .tpid{color:var(--tx3);white-space:nowrap;text-align:right;font-size:.67rem}
-/* level badge — rounded rect with level color */
 .lvb{
   display:inline-block;width:17px;height:17px;border-radius:5px;
   text-align:center;line-height:17px;font-size:.6rem;font-weight:900;
@@ -542,7 +553,11 @@ td{padding:2px 6px;border-bottom:1px solid rgba(255,255,255,.022);
 .lvW{background:rgba(255,214,10,.24);color:var(--Wt)}
 .lvE{background:rgba(255,69,58,.24);color:var(--Et)}
 .lvF{background:rgba(191,90,242,.24);color:var(--Ft)}
-.ttag{color:var(--tx2);white-space:nowrap;text-overflow:ellipsis;overflow:hidden;font-size:.69rem}
+.ttag{
+  color:var(--tx2);white-space:nowrap;text-overflow:ellipsis;overflow:hidden;
+  font-size:.69rem;cursor:pointer;
+}
+.ttag:hover{color:var(--tx);text-decoration:underline;text-underline-offset:2px}
 .tmsg{color:var(--tx);cursor:pointer;white-space:nowrap;text-overflow:ellipsis;overflow:hidden}
 .tmsg.wrap{white-space:pre-wrap;word-break:break-all;overflow:visible}
 .tmsg.exp{white-space:pre-wrap;word-break:break-all;overflow:visible}
@@ -601,27 +616,6 @@ mark{background:rgba(255,214,10,.28);color:#ffe44d;border-radius:2px;padding:0 1
   </div>
 </div>
 
-<div id="charts-wrap">
-  <button id="ch-tog" onclick="toggleCharts()">
-    <svg viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
-    Charts
-    <span id="ch-sum" style="font-weight:400;color:var(--tx3);text-transform:none;letter-spacing:0;margin-left:4px;font-size:.65rem"></span>
-  </button>
-  <div id="ch-inner">
-    <div class="cc" style="flex:0 0 192px">
-      <div class="clbl">Level distribution</div>
-      <div id="dist-bars"></div>
-    </div>
-    <div class="cc" style="flex:1">
-      <div class="clbl">Timeline
-        <span id="tl-range" style="font-weight:400;color:var(--tx3);text-transform:none;letter-spacing:0;font-size:.56rem;margin-left:6px"></span>
-      </div>
-      <svg id="tl-svg" preserveAspectRatio="none"></svg>
-    </div>
-  </div>
-</div>
-<div id="tl-tip"></div>
-
 <div id="controls">
   <div id="pkg-tabs"></div>
   <div class="lchips">
@@ -638,26 +632,38 @@ mark{background:rgba(255,214,10,.28);color:#ffe44d;border-radius:2px;padding:0 1
     <input id="search" type="text" placeholder="Filter  \xb7  / to focus">
     <button id="src-clr" onclick="clearSearch()">\xd7</button>
   </div>
+  <div class="csep"></div>
+  <div id="tag-filter-box" onclick="document.getElementById('tag-input').focus()">
+    <svg viewBox="0 0 24 24"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg>
+    <div id="tag-chips"></div>
+    <input id="tag-input" type="text" placeholder="Tags  \xb7  T">
+  </div>
   <div class="cr">
     <button class="wbtn" id="wbtn" onclick="toggleWrap()">Wrap</button>
     <span id="lcount"></span>
   </div>
 </div>
 
-<div id="log-wrap">
-  <div id="load-earlier" onclick="loadEarlier()">↑ Load earlier lines</div>
-  <table>
-    <colgroup>
-      <col class="c0"><col class="c1"><col class="c2">
-      <col class="c3"><col class="c4"><col class="c5"><col class="c6">
-    </colgroup>
-    <thead><tr>
-      <th style="padding:0"></th>
-      <th>Time</th><th style="text-align:right">PID</th>
-      <th></th><th>Tag</th><th>Message</th><th></th>
-    </tr></thead>
-    <tbody id="tbody"></tbody>
-  </table>
+<div id="log-outer">
+  <div id="log-wrap">
+    <div id="load-earlier" onclick="loadEarlier()">↑ Load earlier lines</div>
+    <table>
+      <colgroup>
+        <col class="c0"><col class="c1"><col class="c2">
+        <col class="c3"><col class="c4"><col class="c5"><col class="c6">
+      </colgroup>
+      <thead><tr>
+        <th style="padding:0;width:3px"></th>
+        <th class="rsz">Time</th>
+        <th class="rsz" style="text-align:right">PID</th>
+        <th></th>
+        <th class="rsz">Tag</th>
+        <th class="rsz">Message</th>
+        <th></th>
+      </tr></thead>
+      <tbody id="tbody"></tbody>
+    </table>
+  </div>
 </div>
 
 <div id="toast"></div>
@@ -668,15 +674,12 @@ mark{background:rgba(255,214,10,.28);color:#ffe44d;border-radius:2px;padding:0 1
 
 <script>
 const LEVELS=['V','D','I','W','E','F'];
-const LBAR={V:'#8e8e93',D:'#5b9aff',I:'#30d158',W:'#ffd60a',E:'#ff453a',F:'#bf5af2'};
-const LDIST={V:'rgba(142,142,147,.65)',D:'rgba(91,154,255,.75)',I:'rgba(48,209,88,.75)',
-             W:'rgba(255,214,10,.75)',E:'rgba(255,69,58,.75)',F:'rgba(191,90,242,.75)'};
 const SID=(new URLSearchParams(location.search)).get('id')||'';
 let activePkg='',packages=[],enabledLevels=new Set(LEVELS);
-let searchKw='',wrapMode=false,chartsOpen=false;
+let searchKw='',wrapMode=false;
+let filterTags=new Set();
 let allRows=[],filteredRows=[],fromLine=0,totalLines=0;
-let isLive=false,atBottom=true,searchTimer=null,cachedSummary=null;
-let tlBuckets={},tlKeys=[];
+let isLive=false,atBottom=true,searchTimer=null;
 
 document.title='Logcat — '+SID;
 document.getElementById('sid-label').textContent=SID;
@@ -694,40 +697,60 @@ function toast(msg,ms=2000){
   clearTimeout(toast._t);toast._t=setTimeout(()=>t.classList.remove('show'),ms);
 }
 
-// keyboard shortcuts
+/* ── Tag filter chips ── */
+const tagInput=document.getElementById('tag-input');
+const tagChipsEl=document.getElementById('tag-chips');
+
+function addTagChip(raw){
+  const tag=raw.trim().toLowerCase();
+  if(!tag||filterTags.has(tag))return;
+  filterTags.add(tag);
+  const chip=document.createElement('span');
+  chip.className='tchip';chip.dataset.tag=tag;
+  chip.innerHTML=esc(tag)+'<button class="tchip-x" title="Remove">\xd7</button>';
+  chip.querySelector('.tchip-x').onclick=e=>{
+    e.stopPropagation();
+    filterTags.delete(tag);chip.remove();applyFilter();
+  };
+  tagChipsEl.appendChild(chip);
+  applyFilter();
+}
+
+tagInput.addEventListener('keydown',e=>{
+  if(e.key==='Enter'||e.key===','){
+    e.preventDefault();addTagChip(tagInput.value);tagInput.value='';
+  }else if(e.key==='Backspace'&&!tagInput.value){
+    const chips=[...tagChipsEl.querySelectorAll('.tchip')];
+    if(chips.length){const last=chips[chips.length-1];filterTags.delete(last.dataset.tag);last.remove();applyFilter();}
+  }else if(e.key==='Escape'){tagInput.value='';tagInput.blur();}
+});
+tagInput.addEventListener('blur',()=>{
+  if(tagInput.value.trim()){addTagChip(tagInput.value);tagInput.value='';}
+});
+
+/* ── Keyboard shortcuts ── */
 document.addEventListener('keydown',e=>{
   if(e.target.tagName==='INPUT')return;
   if(e.key==='/'||e.key==='f'){e.preventDefault();document.getElementById('search').focus();return}
+  if(e.key==='t'||e.key==='T'){e.preventDefault();tagInput.focus();return}
   if(e.key==='g'||e.key==='G'){jumpBottom();return}
-  if(e.key==='c'||e.key==='C'){toggleCharts();return}
   if(e.key==='Escape'){clearSearch();return}
   const m={'1':'V','2':'D','3':'I','4':'W','5':'E','6':'F'};
   if(m[e.key])toggleLevel(m[e.key]);
 });
 document.getElementById('search').addEventListener('keydown',e=>{
-  if(e.key==='Escape'){clearSearch();document.getElementById('search').blur()}
+  if(e.key==='Escape'){clearSearch();document.getElementById('search').blur();}
 });
 
-// charts accordion
-function toggleCharts(){
-  chartsOpen=!chartsOpen;
-  document.getElementById('ch-tog').classList.toggle('open',chartsOpen);
-  document.getElementById('ch-inner').classList.toggle('open',chartsOpen);
-}
-
-// level toggles
+/* ── Level toggles ── */
 function toggleLevel(l){
   if(enabledLevels.has(l))enabledLevels.delete(l);else enabledLevels.add(l);
   document.getElementById('lc-'+l).classList.toggle('on',enabledLevels.has(l));
-  document.querySelectorAll('.dr').forEach(r=>r.classList.toggle('off',!enabledLevels.has(r.dataset.lvl)));
   applyFilter();
 }
 LEVELS.forEach(l=>document.getElementById('lc-'+l).addEventListener('click',()=>toggleLevel(l)));
-document.getElementById('dist-bars').addEventListener('click',e=>{
-  const r=e.target.closest('.dr');if(r)toggleLevel(r.dataset.lvl);
-});
 
-// search
+/* ── Search ── */
 document.getElementById('search').addEventListener('input',e=>{
   clearTimeout(searchTimer);
   document.getElementById('src-clr').style.display=e.target.value?'block':'none';
@@ -739,14 +762,14 @@ function clearSearch(){
   searchKw='';applyFilter();
 }
 
-// wrap
+/* ── Wrap toggle ── */
 function toggleWrap(){
   wrapMode=!wrapMode;
   document.getElementById('wbtn').classList.toggle('on',wrapMode);
   document.querySelectorAll('.tmsg').forEach(td=>td.classList.toggle('wrap',wrapMode));
 }
 
-// parse TSV — auto-detect 5-col (with tid) or 4-col (no tid) layout
+/* ── TSV parser — auto-detect 5-col (with tid) or 4-col (no tid) ── */
 function parseLine(raw){
   const p=raw.split('\t');
   const isL=s=>s&&s.length===1&&'VDIWEF'.includes(s);
@@ -759,11 +782,15 @@ function parseLine(raw){
   return{time:p[0]||'',pid:p[1]||'',lvl,tag,msg};
 }
 
-// filter + render
+/* ── Filter + render ── */
 function applyFilter(){
   const kw=searchKw;
   filteredRows=allRows.filter(r=>{
     if(LEVELS.includes(r.lvl)&&!enabledLevels.has(r.lvl))return false;
+    if(filterTags.size>0){
+      const tl=r.tag.toLowerCase();
+      if(![...filterTags].some(ft=>tl.includes(ft)))return false;
+    }
     if(kw&&!r.msg.toLowerCase().includes(kw)&&!r.tag.toLowerCase().includes(kw)&&!r.time.includes(kw))return false;
     return true;
   });
@@ -772,12 +799,14 @@ function applyFilter(){
 
 function renderTable(){
   const kw=searchKw;
-  document.getElementById('lcount').textContent=filteredRows.length.toLocaleString()+' / '+allRows.length.toLocaleString();
+  document.getElementById('lcount').textContent=
+    filteredRows.length.toLocaleString()+' / '+allRows.length.toLocaleString();
   if(!filteredRows.length){
     let msg='Waiting for log data…';
-    if(allRows.length>0&&searchKw)msg='No results for “'+esc(searchKw)+'”';
+    if(allRows.length>0&&(searchKw||filterTags.size>0))msg='No matching rows';
     else if(allRows.length>0)msg='All '+allRows.length.toLocaleString()+' rows hidden by level filter';
-    document.getElementById('tbody').innerHTML=`<tr class="erow"><td colspan="7">${msg}</td></tr>`;
+    document.getElementById('tbody').innerHTML=
+      `<tr class="erow"><td colspan="7">${msg}</td></tr>`;
     return;
   }
   const wc=wrapMode?' wrap':'';
@@ -786,7 +815,7 @@ function renderTable(){
   <td class="ttime">${esc(r.time)}</td>
   <td class="tpid">${esc(r.pid)}</td>
   <td style="padding:2px 3px;text-align:center"><span class="lvb lv${r.lvl}">${r.lvl}</span></td>
-  <td class="ttag" title="${esc(r.tag)}">${esc(r.tag)}</td>
+  <td class="ttag" title="${esc(r.tag)}" onclick="addTagChip(this.textContent)">${esc(r.tag)}</td>
   <td class="tmsg${wc}" onclick="this.classList.toggle('exp')">${hi(r.msg,kw)}</td>
   <td class="cpbtn" onclick="cpRow(${i})" title="Copy">⧓</td>
 </tr>`).join('');
@@ -813,58 +842,38 @@ document.getElementById('log-wrap').addEventListener('scroll',function(){
   atBottom=at;document.getElementById('fab').classList.toggle('show',!at);
 },{passive:true});
 
-// charts
-function renderDist(summary){
-  const c=(summary&&summary[activePkg])||{V:0,D:0,I:0,W:0,E:0,F:0};
-  const tot=Object.values(c).reduce((a,b)=>a+b,0)||1;
-  document.getElementById('dist-bars').innerHTML=LEVELS.map(l=>`
-    <div class="dr${enabledLevels.has(l)?'':' off'}" data-lvl="${l}">
-      <span class="dlbl" style="color:${LBAR[l]}">${l}</span>
-      <div class="dtrack"><div class="dfill" style="width:${Math.round(c[l]/tot*100)}%;background:${LDIST[l]}"></div></div>
-      <span class="dcnt">${c[l].toLocaleString()}</span>
-    </div>`).join('');
-  const sum=['E','W','I','D'].filter(l=>c[l]>0)
-    .map(l=>`<span style="color:${LBAR[l]}">${l}:${c[l].toLocaleString()}</span>`).join(' ');
-  document.getElementById('ch-sum').innerHTML=sum;
+/* ── Column resizers ── */
+function initColumnResizers(){
+  const allThs=[...document.querySelectorAll('thead th')];
+  const cols=[...document.querySelectorAll('colgroup col')];
+  document.querySelectorAll('thead th.rsz').forEach(th=>{
+    const idx=allThs.indexOf(th);
+    const col=cols[idx];if(!col)return;
+    const h=document.createElement('div');h.className='col-rsz';th.appendChild(h);
+    let sx,sw;
+    h.addEventListener('mousedown',e=>{
+      sx=e.clientX;sw=th.offsetWidth;h.classList.add('active');
+      const mv=e2=>{col.style.width=Math.max(40,sw+(e2.clientX-sx))+'px';};
+      const up=()=>{h.classList.remove('active');
+        document.removeEventListener('mousemove',mv);document.removeEventListener('mouseup',up);};
+      document.addEventListener('mousemove',mv);document.addEventListener('mouseup',up);
+      e.preventDefault();e.stopPropagation();
+    });
+  });
 }
 
-function buildTimeline(rows){
-  tlBuckets={};
-  rows.forEach(r=>{const m=r.time.length>=14?r.time.substring(0,14):'??';tlBuckets[m]=(tlBuckets[m]||0)+1;});
-  tlKeys=Object.keys(tlBuckets).sort();
-}
-
-function renderTimeline(){
-  const svg=document.getElementById('tl-svg');
-  if(!tlKeys.length){svg.innerHTML='';return;}
-  const max=Math.max(...tlKeys.map(k=>tlBuckets[k]));
-  const W=800,H=40,n=tlKeys.length,bw=Math.max(1,Math.floor(W/Math.max(n,1))-1);
-  svg.setAttribute('viewBox',`0 0 ${W} ${H}`);
-  svg.innerHTML=tlKeys.map((k,i)=>{
-    const h=Math.max(2,Math.round(tlBuckets[k]/max*(H-4)));
-    return`<rect x="${i*(bw+1)}" y="${H-h-2}" width="${bw}" height="${h}" rx="1" fill="#5b9aff" opacity=".7" data-k="${esc(k)}" data-c="${tlBuckets[k]}"/>`;
-  }).join('');
-  if(tlKeys.length>1)
-    document.getElementById('tl-range').textContent=tlKeys[0].trim()+' – '+tlKeys[tlKeys.length-1].trim();
-  svg.onmousemove=e=>{
-    const tip=document.getElementById('tl-tip'),r=e.target.closest('rect');
-    if(r){tip.textContent=r.dataset.k+' · '+Number(r.dataset.c).toLocaleString()+' lines';
-          tip.style.cssText=`display:block;left:${e.clientX+12}px;top:${e.clientY-30}px`;}
-    else tip.style.display='none';
-  };
-  svg.onmouseleave=()=>document.getElementById('tl-tip').style.display='none';
-}
-
-// data
+/* ── Data loading ── */
 async function loadLines(fromIdx,prepend){
-  const res=await fetch(`/api/session/${encodeURIComponent(SID)}/lines?pkg=${encodeURIComponent(activePkg)}&from_line=${fromIdx}&limit=2000`).catch(()=>null);
+  const res=await fetch(
+    `/api/session/${encodeURIComponent(SID)}/lines?pkg=${encodeURIComponent(activePkg)}&from_line=${fromIdx}&limit=2000`
+  ).catch(()=>null);
   if(!res||!res.ok)return;
   const d=await res.json();totalLines=d.total;
   const parsed=d.lines.map(parseLine);
   if(prepend){allRows=[...parsed,...allRows];fromLine=d.from;}
   else{allRows=parsed;fromLine=d.from;}
   document.getElementById('load-earlier').style.display=fromLine>0?'block':'none';
-  buildTimeline(allRows);renderTimeline();applyFilter();
+  applyFilter();
 }
 
 async function loadEarlier(){
@@ -878,12 +887,11 @@ async function switchPkg(pkg){
   document.querySelectorAll('.ptab').forEach(t=>t.classList.toggle('active',t.dataset.pkg===pkg));
   allRows=[];filteredRows=[];fromLine=0;totalLines=0;
   document.getElementById('tbody').innerHTML='';
-  const probe=await fetch(`/api/session/${encodeURIComponent(SID)}/lines?pkg=${encodeURIComponent(activePkg)}&from_line=0&limit=0`).catch(()=>null);
+  const probe=await fetch(
+    `/api/session/${encodeURIComponent(SID)}/lines?pkg=${encodeURIComponent(activePkg)}&from_line=0&limit=0`
+  ).catch(()=>null);
   if(probe&&probe.ok){const pd=await probe.json();totalLines=pd.total;fromLine=Math.max(0,totalLines-3000);}
   await loadLines(fromLine,false);
-  if(!cachedSummary)
-    cachedSummary=await fetch(`/api/session/${encodeURIComponent(SID)}/summary`).then(r=>r.json()).catch(()=>null);
-  renderDist(cachedSummary);
   if(atBottom)jumpBottom();
 }
 
@@ -900,13 +908,15 @@ async function livePoll(){
   }
   if(!live)return;
   const tailFrom=allRows.length>0?totalLines:0;
-  const res=await fetch(`/api/session/${encodeURIComponent(SID)}/lines?pkg=${encodeURIComponent(activePkg)}&from_line=${tailFrom}&limit=500`).catch(()=>null);
+  const res=await fetch(
+    `/api/session/${encodeURIComponent(SID)}/lines?pkg=${encodeURIComponent(activePkg)}&from_line=${tailFrom}&limit=500`
+  ).catch(()=>null);
   if(!res||!res.ok)return;
   const d=await res.json();
   if(d.count>0){
     const prev=allRows.length;totalLines=d.total;
     allRows=tailFrom===0?d.lines.map(parseLine):[...allRows,...d.lines.map(parseLine)];
-    buildTimeline(allRows);renderTimeline();applyFilter();
+    applyFilter();
     const added=allRows.length-prev;
     if(added>0){if(atBottom)jumpBottom();else toast('+'+added.toLocaleString()+' new lines');}
   }
@@ -915,12 +925,16 @@ async function livePoll(){
 async function init(){
   const res=await fetch(`/api/session/${encodeURIComponent(SID)}/packages`).catch(()=>null);
   if(!res||!res.ok){
-    document.getElementById('tbody').innerHTML='<tr class="erow"><td colspan="7">Session not found.</td></tr>';
+    document.getElementById('tbody').innerHTML=
+      '<tr class="erow"><td colspan="7">Session not found.</td></tr>';
     return;
   }
   packages=await res.json();
-  document.getElementById('pkg-tabs').innerHTML=packages.map(p=>`<button class="ptab" data-pkg="${esc(p)}" onclick="switchPkg('${esc(p)}')">${esc(p)}</button>`).join('');
+  document.getElementById('pkg-tabs').innerHTML=packages.map(p=>
+    `<button class="ptab" data-pkg="${esc(p)}" onclick="switchPkg('${esc(p)}')">${esc(p)}</button>`
+  ).join('');
   if(packages.length)await switchPkg(packages[0]);
+  initColumnResizers();
   setInterval(livePoll,3000);
 }
 init();
