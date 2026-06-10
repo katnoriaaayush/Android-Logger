@@ -647,16 +647,33 @@ function toggleWrap(){
 }
 
 // ── parse TSV line ────────────────────────────────────────────────────────────
+// Handles two common logcat TSV layouts:
+//   5-col (with tid):  time / pid / tid / level / tag / message
+//   4-col (no  tid):  time / pid / level / tag / message
+// Falls back to showing the raw line when neither layout is detected.
 function parseLine(raw){
   const p=raw.split('\t');
-  return{time:p[0]||'',pid:p[1]||'',lvl:(p[3]||'I').trim(),tag:p[4]||'',msg:p[5]!==undefined?p.slice(5).join('\t'):''};
+  const isLvl=s=>s&&s.length===1&&'VDIWEF'.includes(s);
+  let lvl='I',tag='',msg='';
+  if(isLvl((p[3]||'').trim())){
+    // standard 5-col format (with tid)
+    lvl=p[3].trim();tag=p[4]||'';msg=p.length>5?p.slice(5).join('\t'):(p[4]||'');
+  } else if(isLvl((p[2]||'').trim())){
+    // compact 4-col format (no tid)
+    lvl=p[2].trim();tag=p[3]||'';msg=p.length>4?p.slice(4).join('\t'):(p[3]||'');
+  } else {
+    // unknown format — show raw content in message column
+    msg=raw;
+  }
+  return{time:p[0]||'',pid:p[1]||'',lvl,tag,msg};
 }
 
 // ── filter + render ───────────────────────────────────────────────────────────
 function applyFilter(){
   const kw=searchKw;
   filteredRows=allRows.filter(r=>{
-    if(!enabledLevels.has(r.lvl))return false;
+    // rows with unrecognised levels always pass the level filter
+    if(LEVELS.includes(r.lvl)&&!enabledLevels.has(r.lvl))return false;
     if(kw&&!r.msg.toLowerCase().includes(kw)&&!r.tag.toLowerCase().includes(kw)&&!r.time.includes(kw))return false;
     return true;
   });
@@ -666,6 +683,13 @@ function applyFilter(){
 function renderTable(){
   const kw=searchKw;
   document.getElementById('count').textContent=filteredRows.length.toLocaleString()+' / '+allRows.length.toLocaleString()+' lines';
+  if(!filteredRows.length){
+    let msg='Waiting for log data…';
+    if(allRows.length>0&&searchKw) msg='No rows match "'+esc(searchKw)+'"';
+    else if(allRows.length>0) msg='All '+allRows.length.toLocaleString()+' rows hidden by level filter';
+    document.getElementById('tbody').innerHTML=`<tr><td colspan="6" style="text-align:center;padding:32px;color:var(--muted);font-family:system-ui">${msg}</td></tr>`;
+    return;
+  }
   const wc=wrapMode?' wrap':'';
   document.getElementById('tbody').innerHTML=filteredRows.map((r,i)=>`
 <tr class="r-${r.lvl}" data-i="${i}">
@@ -797,11 +821,12 @@ async function switchPkg(pkg){
   document.querySelectorAll('.pkg-tab').forEach(t=>t.classList.toggle('active',t.dataset.pkg===pkg));
   allRows=[];filteredRows=[];fromLine=0;totalLines=0;
   document.getElementById('tbody').innerHTML='';
-  // load last 3000 lines
-  const res0=await fetch(`/api/session/${encodeURIComponent(SID)}/lines?pkg=${encodeURIComponent(activePkg)}&from_line=0&limit=1`).catch(()=>null);
-  if(res0&&res0.ok){
-    const d0=await res0.json();
-    totalLines=d0.total;
+  // Single fetch: ask for the total first by fetching limit=0, then load from the tail.
+  // Using limit=0 avoids a second round-trip while still getting the correct total.
+  const probe=await fetch(`/api/session/${encodeURIComponent(SID)}/lines?pkg=${encodeURIComponent(activePkg)}&from_line=0&limit=0`).catch(()=>null);
+  if(probe&&probe.ok){
+    const pd=await probe.json();
+    totalLines=pd.total;
     fromLine=Math.max(0,totalLines-3000);
   }
   await loadLines(fromLine,false);
@@ -824,14 +849,18 @@ async function livePoll(){
     if(!live)showToast('Session complete',3000);
   }
   if(!live)return;
-  const tailFrom=totalLines>0?totalLines:0;
+  // When allRows is empty (initial load found nothing), fetch from 0 to catch
+  // lines that arrived between page load and now.
+  const tailFrom=allRows.length>0?totalLines:0;
   const res=await fetch(`/api/session/${encodeURIComponent(SID)}/lines?pkg=${encodeURIComponent(activePkg)}&from_line=${tailFrom}&limit=500`).catch(()=>null);
   if(!res||!res.ok)return;
   const d=await res.json();
   if(d.count>0){
     const prev=allRows.length;
     totalLines=d.total;
-    allRows=[...allRows,...d.lines.map(parseLine)];
+    // When starting from 0 (empty table), replace rather than append to avoid
+    // duplicating lines that the initial loadLines may have already fetched.
+    allRows=tailFrom===0?d.lines.map(parseLine):[...allRows,...d.lines.map(parseLine)];
     buildTimeline(allRows);
     renderTimeline();
     applyFilter();
