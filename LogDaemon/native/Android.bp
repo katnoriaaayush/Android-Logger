@@ -1,0 +1,45 @@
+// Android.bp — AOSP Soong build rule for the logdaemon native binary
+//
+// Build:  m logdaemon
+// Output: out/target/product/<device>/system/bin/logdaemon
+//
+// Install the binary at /system/bin/logdaemon and the .rc file at
+// /system/etc/init/logdaemon.rc on the target device.
+
+cc_binary {
+    name: "logdaemon",
+
+    srcs: ["logdaemon.c"],
+
+    cflags: [
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-D_FILE_OFFSET_BITS=64",
+    ],
+
+    shared_libs: [
+        "libc",
+    ],
+
+    static_libs: [],
+
+    // Install to /system/bin/
+    install_path: "/system/bin",
+
+    // The binary runs as root via init.rc; no Android permissions needed.
+    // No sanitizers — this is a long-running daemon and ASAN overhead is
+    // unacceptable.
+    sanitize: {
+        never: true,
+    },
+
+    // Required for logcat -G (CONTROL_LOGD) when running as root via init
+    required: ["logdaemon.rc"],
+}
+
+prebuilt_etc {
+    name: "logdaemon.rc",
+    src: "logdaemon.rc",
+    sub_dir: "init",
+}

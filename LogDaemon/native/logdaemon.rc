@@ -1,0 +1,17 @@
+# logdaemon.rc — place at /system/etc/init/logdaemon.rc
+#
+# The daemon is started by a property trigger (not as part of late_start
+# class bring-up) so that /data/media/0/ and /mnt/media_rw/ are guaranteed
+# to be mounted before it runs.
+
+service logdaemon /system/bin/logdaemon
+    class late_start
+    user root
+    group root media_rw
+    seclabel u:r:shell:s0
+    disabled
+    restart_period 5
+
+# Start only after boot is complete and storage is ready
+on property:sys.boot_completed=1
+    start logdaemon
