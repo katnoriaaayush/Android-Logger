@@ -29,9 +29,6 @@
         tools:ignore="ProtectedPermissions" />
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
         tools:ignore="ScopedStorage" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
-
     <application
         android:name=".LogDaemonApp"
         android:allowBackup="false"
@@ -39,12 +36,13 @@
         android:directBootAware="true"
         tools:ignore="AllowBackup">
 
-        <!-- Boot receiver: starts the service when the device boots -->
+        <!-- Boot receiver: starts the service in every user (owner + user profiles).
+             singleUser removed so BOOT_COMPLETED fires in user 1 too, allowing
+             that user's service instance to capture its own logcat lines. -->
         <receiver
             android:name=".BootReceiver"
             android:enabled="true"
             android:exported="true"
-            android:singleUser="true"
             android:directBootAware="true">
             <intent-filter android:priority="999">
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
@@ -53,33 +51,29 @@
             </intent-filter>
         </receiver>
 
-        <!-- USB attach/detach receiver -->
+        <!-- USB mount receiver: updates hint file and relaunches helper if needed -->
         <receiver
             android:name=".usb.UsbStateReceiver"
             android:enabled="true"
             android:exported="true"
             android:singleUser="true">
             <intent-filter>
-                <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
-                <action android:name="android.hardware.usb.action.USB_DEVICE_DETACHED" />
                 <action android:name="android.intent.action.MEDIA_MOUNTED" />
-                <action android:name="android.intent.action.MEDIA_UNMOUNTED" />
-                <action android:name="android.intent.action.MEDIA_EJECT" />
-                <action android:name="android.intent.action.MEDIA_REMOVED" />
                 <data android:scheme="file" />
             </intent-filter>
         </receiver>
 
         <!--
-            The daemon service.
-            stopWithTask=false ensures it isn't killed if a (non-existent) UI task closes.
-            No <intent-filter> for LAUNCHER => no launcher icon, no notification.
+            Long-running capture service. Runs in every user (no singleUser) so each
+            user's instance captures logcat for that user's own processes and streams
+            lines to the native helper via abstract socket @logdaemon.
+            The service itself skips capture for SecureFolder (user ≥ 2) — see captureLoop().
+            No <intent-filter> for LAUNCHER => no launcher icon.
         -->
         <service
             android:name=".LogDaemonService"
             android:enabled="true"
             android:exported="false"
-            android:singleUser="true"
             android:stopWithTask="false"
             android:directBootAware="true" />
 

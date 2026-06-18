@@ -1,0 +1,159 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxGraphModel dx="1422" dy="762" grid="0" gridSize="10" guides="1" tooltips="1"
+              connect="1" arrows="1" fold="1" page="0" pageScale="1"
+              pageWidth="1169" pageHeight="1100" math="0" shadow="0">
+  <root>
+    <mxCell id="0"/>
+    <mxCell id="1" parent="0"/>
+
+    <!-- ═══════════════════════════════════════════════════
+         TITLE
+    ═══════════════════════════════════════════════════ -->
+    <mxCell id="10"
+      value="&lt;font style=&quot;font-size:18px;font-weight:bold;&quot;&gt;logdaemon — Flow State Architecture&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:11px;color:#64748b;&quot;&gt;init.rc Native Daemon  ·  Android Log Capture System&lt;/font&gt;"
+      style="text;html=1;align=center;verticalAlign=middle;strokeColor=none;fillColor=none;"
+      vertex="1" parent="1">
+      <mxGeometry x="80" y="20" width="640" height="60" as="geometry"/>
+    </mxCell>
+
+    <!-- ═══════════════════════════════════════════════════
+         STATE 1 — BOOT
+    ═══════════════════════════════════════════════════ -->
+    <mxCell id="20"
+      value="&lt;font style=&quot;font-size:13px;font-weight:bold;color:#1d4ed8;&quot;&gt;1  |  Boot&lt;/font&gt;&lt;br&gt;&lt;br&gt;&lt;font style=&quot;font-size:11px;color:#374151;&quot;&gt;· init reads logdaemon.rc at device boot&lt;br&gt;· Daemon started as uid = 0 (root)&lt;br&gt;· Waits for sys.boot_completed = 1&lt;br&gt;· Auto-restarts every 5s on exit&lt;/font&gt;"
+      style="rounded=1;html=1;fillColor=#eff6ff;strokeColor=#93c5fd;strokeWidth=2;align=left;verticalAlign=top;spacingLeft=16;spacingTop=12;spacingBottom=12;"
+      vertex="1" parent="1">
+      <mxGeometry x="80" y="95" width="640" height="100" as="geometry"/>
+    </mxCell>
+
+    <!-- Arrow 1: Boot → Detect -->
+    <mxCell id="80"
+      value="boot_completed = 1"
+      style="edgeStyle=orthogonalEdgeStyle;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeColor=#94a3b8;strokeWidth=2;fontSize=10;fontColor=#475569;fillColor=#f1f5f9;labelBackgroundColor=#f1f5f9;labelBorderColor=#e2e8f0;rounded=1;"
+      edge="1" source="20" target="30" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+
+    <!-- ═══════════════════════════════════════════════════
+         STATE 2 — USB DETECTION
+    ═══════════════════════════════════════════════════ -->
+    <mxCell id="30"
+      value="&lt;font style=&quot;font-size:13px;font-weight:bold;color:#6d28d9;&quot;&gt;2  |  USB Detection&lt;/font&gt;&lt;br&gt;&lt;br&gt;&lt;font style=&quot;font-size:11px;color:#374151;&quot;&gt;· inotify watches /mnt/media_rw/ for IN_CREATE&lt;br&gt;· Finds log.sinfo  →  reads package list + options&lt;br&gt;· File closed immediately — no USB handle retained&lt;/font&gt;"
+      style="rounded=1;html=1;fillColor=#f5f3ff;strokeColor=#c4b5fd;strokeWidth=2;align=left;verticalAlign=top;spacingLeft=16;spacingTop=12;spacingBottom=12;"
+      vertex="1" parent="1">
+      <mxGeometry x="80" y="248" width="640" height="95" as="geometry"/>
+    </mxCell>
+
+    <!-- Self-loop badge: log.sinfo not found -->
+    <mxCell id="31"
+      value="↺  log.sinfo not found — sleep 5s"
+      style="rounded=1;html=1;fillColor=#f5f3ff;strokeColor=#c4b5fd;strokeWidth=1;fontSize=10;fontColor=#6d28d9;align=center;verticalAlign=middle;"
+      vertex="1" parent="1">
+      <mxGeometry x="462" y="256" width="246" height="24" as="geometry"/>
+    </mxCell>
+
+    <!-- Arrow 2: Detect → Start -->
+    <mxCell id="81"
+      value="log.sinfo found"
+      style="edgeStyle=orthogonalEdgeStyle;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeColor=#94a3b8;strokeWidth=2;fontSize=10;fontColor=#475569;fillColor=#f1f5f9;labelBackgroundColor=#f1f5f9;labelBorderColor=#e2e8f0;rounded=1;"
+      edge="1" source="30" target="40" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+
+    <!-- ═══════════════════════════════════════════════════
+         STATE 3 — SESSION START
+    ═══════════════════════════════════════════════════ -->
+    <mxCell id="40"
+      value="&lt;font style=&quot;font-size:13px;font-weight:bold;color:#15803d;&quot;&gt;3  |  Session Start&lt;/font&gt;&lt;br&gt;&lt;br&gt;&lt;font style=&quot;font-size:11px;color:#374151;&quot;&gt;· Creates /data/media/0/LogDaemon/logs/[timestamp]/&lt;br&gt;· Opens .log and .tsv writers per target package&lt;br&gt;· Spawns sync thread&lt;br&gt;· Forks logcat -T [last_ts] as root — replays ring buffer from checkpoint&lt;/font&gt;"
+      style="rounded=1;html=1;fillColor=#f0fdf4;strokeColor=#86efac;strokeWidth=2;align=left;verticalAlign=top;spacingLeft=16;spacingTop=12;spacingBottom=12;"
+      vertex="1" parent="1">
+      <mxGeometry x="80" y="396" width="640" height="100" as="geometry"/>
+    </mxCell>
+
+    <!-- Arrow 3: Start → Active -->
+    <mxCell id="82"
+      value="threads running"
+      style="edgeStyle=orthogonalEdgeStyle;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeColor=#94a3b8;strokeWidth=2;fontSize=10;fontColor=#475569;fillColor=#f1f5f9;labelBackgroundColor=#f1f5f9;labelBorderColor=#e2e8f0;rounded=1;"
+      edge="1" source="40" target="50" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+
+    <!-- ═══════════════════════════════════════════════════
+         STATE 4 — ACTIVE SESSION (CONTAINER)
+    ═══════════════════════════════════════════════════ -->
+    <mxCell id="50"
+      value="&lt;font style=&quot;font-size:13px;font-weight:bold;color:#334155;&quot;&gt;4  |  Active Session&lt;/font&gt;"
+      style="rounded=1;html=1;fillColor=#f8fafc;strokeColor=#cbd5e1;strokeWidth=2;align=left;verticalAlign=top;spacingLeft=16;spacingTop=12;"
+      vertex="1" parent="1">
+      <mxGeometry x="80" y="549" width="640" height="272" as="geometry"/>
+    </mxCell>
+
+    <!-- "running in parallel" label -->
+    <mxCell id="53"
+      value="—— running in parallel ——"
+      style="text;html=1;align=center;verticalAlign=middle;strokeColor=none;fillColor=none;fontSize=10;fontColor=#94a3b8;"
+      vertex="1" parent="1">
+      <mxGeometry x="80" y="588" width="640" height="20" as="geometry"/>
+    </mxCell>
+
+    <!-- Main Thread sub-card -->
+    <mxCell id="51"
+      value="&lt;font style=&quot;font-size:12px;font-weight:bold;color:#065f46;&quot;&gt;Main Thread&lt;/font&gt;&lt;br&gt;&lt;br&gt;&lt;font style=&quot;font-size:11px;color:#374151;&quot;&gt;· Reads logcat pipe as root&lt;br&gt;· Captures logs from all user profiles&lt;br&gt;· Matches PID → target package&lt;br&gt;· Writes .log / .tsv to internal storage&lt;br&gt;· Checkpoints .last_ts every 64 lines&lt;/font&gt;"
+      style="rounded=1;html=1;fillColor=#ecfdf5;strokeColor=#6ee7b7;strokeWidth=2;align=left;verticalAlign=top;spacingLeft=12;spacingTop=10;spacingBottom=10;"
+      vertex="1" parent="1">
+      <mxGeometry x="94" y="614" width="293" height="196" as="geometry"/>
+    </mxCell>
+
+    <!-- Sync Thread sub-card -->
+    <mxCell id="52"
+      value="&lt;font style=&quot;font-size:12px;font-weight:bold;color:#854d0e;&quot;&gt;Sync Thread&lt;/font&gt;&lt;br&gt;&lt;br&gt;&lt;font style=&quot;font-size:11px;color:#374151;&quot;&gt;· Wakes every 5s (poll timeout)&lt;br&gt;· inotify watches USB root for IN_UNMOUNT&lt;br&gt;· Reads offset → streams 64 KB chunk&lt;br&gt;· open → fwrite → close per cycle&lt;br&gt;· 5s debounce: profile switch vs real eject&lt;/font&gt;"
+      style="rounded=1;html=1;fillColor=#fefce8;strokeColor=#fde047;strokeWidth=2;align=left;verticalAlign=top;spacingLeft=12;spacingTop=10;spacingBottom=10;"
+      vertex="1" parent="1">
+      <mxGeometry x="413" y="614" width="293" height="196" as="geometry"/>
+    </mxCell>
+
+    <!-- Arrow 4: Active → End -->
+    <mxCell id="83"
+      value="USB ejected  (IN_UNMOUNT + 5s debounce)"
+      style="edgeStyle=orthogonalEdgeStyle;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeColor=#94a3b8;strokeWidth=2;fontSize=10;fontColor=#475569;fillColor=#f1f5f9;labelBackgroundColor=#f1f5f9;labelBorderColor=#e2e8f0;rounded=1;"
+      edge="1" source="50" target="60" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+
+    <!-- ═══════════════════════════════════════════════════
+         STATE 5 — SESSION END
+    ═══════════════════════════════════════════════════ -->
+    <mxCell id="60"
+      value="&lt;font style=&quot;font-size:13px;font-weight:bold;color:#c2410c;&quot;&gt;5  |  Session End&lt;/font&gt;&lt;br&gt;&lt;br&gt;&lt;font style=&quot;font-size:11px;color:#374151;&quot;&gt;· g_usb_gone = 1  →  capture loop exits cleanly&lt;br&gt;· Log writers flushed and closed&lt;br&gt;· _summary.tsv written to internal storage&lt;br&gt;· Sync thread performs final USB flush&lt;br&gt;· Process exits  →  init restarts daemon after 5s&lt;/font&gt;"
+      style="rounded=1;html=1;fillColor=#fff7ed;strokeColor=#fdba74;strokeWidth=2;align=left;verticalAlign=top;spacingLeft=16;spacingTop=12;spacingBottom=12;"
+      vertex="1" parent="1">
+      <mxGeometry x="80" y="872" width="640" height="110" as="geometry"/>
+    </mxCell>
+
+    <!-- ═══════════════════════════════════════════════════
+         RESTART BANNER
+    ═══════════════════════════════════════════════════ -->
+    <mxCell id="70"
+      value="↺  init restarts logdaemon after 5s  →  returns to USB Detection (step 2)"
+      style="rounded=1;html=1;fillColor=#f8fafc;strokeColor=#94a3b8;strokeWidth=1;dashed=1;align=center;verticalAlign=middle;fontSize=11;fontColor=#64748b;"
+      vertex="1" parent="1">
+      <mxGeometry x="80" y="998" width="640" height="38" as="geometry"/>
+    </mxCell>
+
+    <!-- ═══════════════════════════════════════════════════
+         RESTART ARROW: End → Detect  (left-side loop)
+    ═══════════════════════════════════════════════════ -->
+    <mxCell id="85"
+      value="restarted by init"
+      style="edgeStyle=orthogonalEdgeStyle;html=1;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;strokeColor=#94a3b8;strokeWidth=2;fontSize=10;fontColor=#475569;fillColor=#f1f5f9;labelBackgroundColor=#f1f5f9;labelBorderColor=#e2e8f0;rounded=1;"
+      edge="1" source="60" target="30" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <Array as="points">
+          <mxPoint x="28" y="927"/>
+          <mxPoint x="28" y="295"/>
+        </Array>
+      </mxGeometry>
+    </mxCell>
+
+  </root>
+</mxGraphModel>

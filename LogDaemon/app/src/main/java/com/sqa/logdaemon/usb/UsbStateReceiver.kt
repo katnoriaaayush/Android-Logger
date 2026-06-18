@@ -7,25 +7,20 @@ import android.util.Log
 import com.sqa.logdaemon.LogDaemonService
 
 /**
- * Forwards USB attach/detach and media mount/unmount events to the daemon
- * service. We listen to MEDIA_MOUNTED because that's when the USB drive is
- * actually accessible at a filesystem path — USB_DEVICE_ATTACHED fires earlier,
- * before the kernel has mounted the FS.
+ * Listens for ACTION_MEDIA_MOUNTED so the service can update the USB hint file
+ * and launch the helper if it isn't already running. This handles the hot-plug
+ * case: USB attached after the device booted and the service already ran.
  */
 class UsbStateReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        val action = intent.action ?: return
-        Log.i(TAG, "USB/media event: $action data=${intent.dataString}")
-
-        val forward = Intent(context, LogDaemonService::class.java).apply {
-            this.action = action
-            intent.data?.let { data = it }
-        }
-        try {
-            context.startService(forward)
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to forward to LogDaemonService", e)
-        }
+        if (intent.action != Intent.ACTION_MEDIA_MOUNTED) return
+        Log.i(TAG, "USB mounted: ${intent.dataString}")
+        context.startService(
+            Intent(context, LogDaemonService::class.java).apply {
+                action = intent.action
+                data = intent.data  // file:///storage/<uuid> — needed to extract volume path
+            }
+        )
     }
 
     companion object {

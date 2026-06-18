@@ -1,0 +1,25 @@
+# logdaemon.rc — init.rc service definition for LogDaemon (Logv4)
+#
+# Install to: /system/etc/init/logdaemon.rc
+# Binary at:  /system/bin/logdaemon
+#
+# This file is parsed by Android init at boot. The service starts after
+# the vold/media_rw subsystem is up (class late_start), so USB FAT mounts
+# at /mnt/media_rw/ are available when logdaemon first scans.
+
+service logdaemon /system/bin/logdaemon
+    class late_start
+    user root
+    group root media_rw
+    seclabel u:r:shell:s0
+    disabled
+    restart_period 5
+
+# Start once the file-based encryption (FBE) credential-encrypted storage
+# is unlocked for user 0, which is when vold has mounted USB FAT volumes.
+on property:vold.decrypt=trigger_restart_framework
+    start logdaemon
+
+# Also start on every boot for non-FBE devices (userdata already mounted).
+on property:sys.boot_completed=1
+    start logdaemon
