@@ -10,6 +10,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.database.ContentObserver
 import android.hardware.usb.UsbManager
+import android.media.AudioManager
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
@@ -91,14 +92,16 @@ class KpiEventService : Service() {
 
     private val volumeMusicObserver = object : ContentObserver(mainHandler) {
         override fun onChange(selfChange: Boolean) {
-            val v = Settings.System.getInt(contentResolver, Settings.System.VOLUME_MUSIC, -1)
+            val v = getSystemService(AudioManager::class.java)
+                .getStreamVolume(AudioManager.STREAM_MUSIC)
             log("VOLUME_MUSIC", "Music volume changed to: $v")
         }
     }
 
     private val volumeRingObserver = object : ContentObserver(mainHandler) {
         override fun onChange(selfChange: Boolean) {
-            val v = Settings.System.getInt(contentResolver, Settings.System.VOLUME_RING, -1)
+            val v = getSystemService(AudioManager::class.java)
+                .getStreamVolume(AudioManager.STREAM_RING)
             log("VOLUME_RING", "Ring volume changed to: $v")
         }
     }
@@ -188,9 +191,9 @@ class KpiEventService : Service() {
         contentResolver.registerContentObserver(
             Settings.System.getUriFor(Settings.System.SCREEN_OFF_TIMEOUT), false, timeoutObserver)
         contentResolver.registerContentObserver(
-            Settings.System.getUriFor(Settings.System.VOLUME_MUSIC), false, volumeMusicObserver)
+            Settings.System.getUriFor("volume_music"), false, volumeMusicObserver)
         contentResolver.registerContentObserver(
-            Settings.System.getUriFor(Settings.System.VOLUME_RING), false, volumeRingObserver)
+            Settings.System.getUriFor("volume_ring"), false, volumeRingObserver)
 
         val cm = getSystemService(ConnectivityManager::class.java)
         cm.registerNetworkCallback(NetworkRequest.Builder().build(), networkCallback)
