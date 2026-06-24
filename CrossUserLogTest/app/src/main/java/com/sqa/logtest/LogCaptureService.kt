@@ -5,7 +5,6 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.os.Environment
 import android.os.IBinder
 import android.util.Log
@@ -15,53 +14,117 @@ import java.io.PrintWriter
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 
 class LogCaptureService : Service() {
 
     companion object {
         const val TAG = "LogCaptureService"
-        // ── Change this to the package you want to trace across all user profiles ──
-        const val TARGET_PKG = "com.abc.xyz"
-
+        const val TARGET_PKG  = "com.abc.xyz"
         const val CHANNEL_ID  = "log_capture"
         const val NOTIF_ID    = 1
         const val ACTION_STOP = "com.sqa.logtest.STOP"
+
+        // How often to re-scan /proc for new/dead PIDs of TARGET_PKG (ms)
+        const val PID_REFRESH_MS = 15_000L
     }
 
     private var logcatProcess: java.lang.Process? = null
     private var captureThread: Thread? = null
+    private var pidRefreshThread: Thread? = null
     @Volatile private var outputFile: File? = null
+
+    // pid → userId  (kept current by the PID-refresh thread)
+    // ConcurrentHashMap so the capture thread can read without locking
+    private val pidToUser = ConcurrentHashMap<Int, Int>()
+
+    // ─── lifecycle ────────────────────────────────────────────────────────────
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
-        Log.i(TAG, "onCreate  myUid=${android.os.Process.myUid()}  myPid=${android.os.Process.myPid()}")
+        Log.i(TAG, "onCreate uid=${android.os.Process.myUid()}")
         startForeground(NOTIF_ID, buildNotification("Starting…"))
+        startPidRefresher()
         startCapture()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP) {
-            Log.i(TAG, "Stop requested via ACTION_STOP")
-            stopSelf()
-            return START_NOT_STICKY
-        }
-        return START_STICKY          // restart automatically if killed
+        if (intent?.action == ACTION_STOP) { stopSelf(); return START_NOT_STICKY }
+        return START_STICKY
     }
 
     override fun onDestroy() {
         super.onDestroy()
         logcatProcess?.destroy()
         captureThread?.interrupt()
-        Log.i(TAG, "onDestroy — capture stopped")
+        pidRefreshThread?.interrupt()
+        Log.i(TAG, "onDestroy")
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
+    // ─── PID resolver ─────────────────────────────────────────────────────────
+    //
+    // Scans /proc/*/cmdline every PID_REFRESH_MS milliseconds.
+    // Android app process names equal their package name, with an optional
+    // colon-suffix for multi-process components (e.g. com.abc.xyz:service).
+    // /proc/<pid>/status gives us the UID → we compute userId = uid / 100_000.
+    //
+    // Running as UID 1000 (system) we can read all processes' /proc entries,
+    // including those from secondary user profiles.
+
+    private fun startPidRefresher() {
+        pidRefreshThread = Thread({
+            while (!Thread.currentThread().isInterrupted) {
+                refreshPids()
+                try { Thread.sleep(PID_REFRESH_MS) }
+                catch (e: InterruptedException) { break }
+            }
+        }, "pid-refresher").also { it.isDaemon = true; it.start() }
+    }
+
+    private fun refreshPids() {
+        val found = mutableMapOf<Int, Int>()   // pid → userId
+
+        File("/proc").listFiles()?.forEach { dir ->
+            val pid = dir.name.toIntOrNull() ?: return@forEach
+            try {
+                // cmdline: null-terminated arguments; first = process name
+                val raw = File(dir, "cmdline").readBytes()
+                val end = raw.indexOfFirst { it == 0.toByte() }.let { if (it < 0) raw.size else it }
+                val processName = raw.copyOf(end).toString(Charsets.UTF_8)
+
+                // Match "com.abc.xyz" or "com.abc.xyz:anyprocess"
+                if (processName != TARGET_PKG && !processName.startsWith("$TARGET_PKG:"))
+                    return@forEach
+
+                // Read effective UID from /proc/<pid>/status (line "Uid: real eff saved fs")
+                val uid = File(dir, "status").useLines { lines ->
+                    lines.firstOrNull { it.startsWith("Uid:") }
+                        ?.split("\t")?.getOrNull(1)?.trim()?.toIntOrNull()
+                } ?: 0
+
+                found[pid] = uid / 100_000   // 0 = owner, 10 = user10, etc.
+            } catch (_: Exception) { /* process died mid-scan */ }
+        }
+
+        // Sync into the shared map
+        pidToUser.clear()
+        pidToUser.putAll(found)
+
+        if (found.isNotEmpty()) {
+            Log.d(TAG, "PIDs for $TARGET_PKG: " +
+                    found.entries.joinToString { "pid=${it.key} user=${it.value}" })
+            updateNotification("Capturing — ${found.size} process(es) found")
+        } else {
+            Log.d(TAG, "No running processes found for $TARGET_PKG")
+            updateNotification("Waiting for $TARGET_PKG to start…")
+        }
+    }
+
+    // ─── logcat capture ───────────────────────────────────────────────────────
 
     private fun startCapture() {
-        val appId = resolveTargetAppId()
-
         val outDir = File(Environment.getExternalStorageDirectory(), "CrossUserLogTest")
         outDir.mkdirs()
 
@@ -69,15 +132,15 @@ class LogCaptureService : Service() {
         val file = File(outDir, "${TARGET_PKG}_$ts.txt")
         outputFile = file
 
-        updateNotification("Writing → ${file.name}")
-
-        captureThread = Thread({ runCapture(file, appId) }, "logcat-capture")
+        captureThread = Thread({ runCapture(file) }, "logcat-capture")
         captureThread!!.isDaemon = true
         captureThread!!.start()
     }
 
-    private fun runCapture(outFile: File, appId: Int) {
+    private fun runCapture(outFile: File) {
         try {
+            // -v uid,threadtime  → date time uid pid tid level tag: message
+            // -b all             → all ring buffers
             val proc = Runtime.getRuntime().exec(arrayOf(
                 "logcat", "-v", "uid,threadtime", "-b", "all"
             ))
@@ -85,81 +148,51 @@ class LogCaptureService : Service() {
 
             PrintWriter(outFile.bufferedWriter()).use { writer ->
                 val myUid = android.os.Process.myUid()
-                writer.println("# CrossUserLogTest")
+                writer.println("# CrossUserLogTest — PID-based filter")
                 writer.println("# Target package : $TARGET_PKG")
                 writer.println("# Service UID    : $myUid " +
-                        if (myUid == 1000) "(system — cross-user access ENABLED)"
-                        else "(NOT 1000 — platform signing missing, cross-user access BLOCKED)")
-                writer.println("# Match rule     : uid % 100_000 == $appId")
-                writer.println("#   This matches $TARGET_PKG in ALL user profiles regardless of")
-                writer.println("#   their user ID (Android assigns secondary user IDs from 10+,")
-                writer.println("#   so probing 1..9 would miss every real secondary profile).")
+                        if (myUid == 1000) "(system — cross-user PIDs visible)"
+                        else "(NOT 1000 — may only see owner-profile PIDs)")
+                writer.println("# PID refresh    : every ${PID_REFRESH_MS / 1000}s via /proc scan")
+                writer.println("# Match rule     : pid in {pids of $TARGET_PKG} — exact process match,")
+                writer.println("#                  no false positives from shared UIDs or system services")
                 writer.println("# Started        : ${Date()}")
                 writer.println("# Output         : ${outFile.absolutePath}")
                 writer.println("# Format         : [userN] date time uid pid tid level tag: message")
                 writer.println("# ─────────────────────────────────────────────────────────")
                 writer.flush()
 
-                if (appId < 0) {
-                    writer.println("# WARNING: $TARGET_PKG not found in owner profile — nothing to capture.")
-                    writer.println("# Install the package and restart this service.")
-                    writer.flush()
-                    Log.w(TAG, "$TARGET_PKG not installed — appId=-1, capture aborted")
-                    return
-                }
-
-                Log.i(TAG, "Streaming logcat — matching uid%100_000==$appId for $TARGET_PKG")
                 var lineCount = 0
                 proc.inputStream.bufferedReader().forEachLine { line ->
-                    val uid = extractUid(line) ?: return@forEachLine
-                    if (uid % 100_000 != appId) return@forEachLine
+                    val pid = extractPid(line) ?: return@forEachLine
+                    val userId = pidToUser[pid] ?: return@forEachLine  // not our process
 
-                    // Prefix each line with which user profile it came from
-                    val userId = uid / 100_000
-                    val prefix = if (userId == 0) "[owner]" else "[user$userId]"
-                    writer.println("$prefix $line")
+                    val profile = if (userId == 0) "[owner]" else "[user$userId]"
+                    writer.println("$profile $line")
                     lineCount++
                     if (lineCount % 10 == 0) writer.flush()
                 }
             }
         } catch (e: InterruptedException) {
-            Log.i(TAG, "Capture thread interrupted — normal shutdown")
+            Log.i(TAG, "Capture thread interrupted")
         } catch (e: Exception) {
             Log.e(TAG, "Capture error: ${e.message}", e)
         }
     }
 
-    // ── AppId resolution ──────────────────────────────────────────────────────
+    // ─── line parser ──────────────────────────────────────────────────────────
     //
-    // Android multi-user UID formula:  fullUid = userId * 100_000 + appId
+    // logcat -v uid,threadtime format:
+    //   MM-DD HH:MM:SS.mmm  <uid>  <pid>  <tid>  <L>  <tag>: <msg>
     //
-    // We only need the appId (uid % 100_000). Matching on this catches
-    // the same package in every user profile no matter what userId Android
-    // assigned (secondary users start at ID 10, not 1, in AOSP).
+    // Group 1 = PID (we skip UID — \d+ without capture — then capture PID).
 
-    private fun resolveTargetAppId(): Int {
-        return try {
-            val ownerUid = packageManager.getApplicationInfo(TARGET_PKG, 0).uid
-            val appId = ownerUid % 100_000
-            Log.i(TAG, "$TARGET_PKG owner uid=$ownerUid  appId=$appId")
-            appId
-        } catch (e: PackageManager.NameNotFoundException) {
-            Log.w(TAG, "$TARGET_PKG not installed in owner profile")
-            -1
-        }
-    }
+    private val lineRe = Regex("""^\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+\s+\d+\s+(\d+)\s+""")
 
-    // ── Line parser ───────────────────────────────────────────────────────────
-    //
-    // logcat -v uid,threadtime line format:
-    //   MM-DD HH:MM:SS.mmm  <uid>  <pid>  <tid>  <L>  <tag>: <message>
-
-    private val lineRe = Regex("""^\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+\s+(\d+)\s+""")
-
-    private fun extractUid(line: String): Int? =
+    private fun extractPid(line: String): Int? =
         lineRe.find(line)?.groupValues?.getOrNull(1)?.toIntOrNull()
 
-    // ── Notification ──────────────────────────────────────────────────────────
+    // ─── notification ─────────────────────────────────────────────────────────
 
     private fun buildNotification(status: String): Notification {
         val nm = getSystemService(NotificationManager::class.java)
@@ -174,10 +207,8 @@ class LogCaptureService : Service() {
             .build()
     }
 
-    private fun updateNotification(status: String) {
-        val nm = getSystemService(NotificationManager::class.java)
-        nm.notify(NOTIF_ID, buildNotification(status))
-    }
+    private fun updateNotification(status: String) =
+        getSystemService(NotificationManager::class.java).notify(NOTIF_ID, buildNotification(status))
 
     fun getOutputFilePath(): String = outputFile?.absolutePath ?: "not started"
 }
