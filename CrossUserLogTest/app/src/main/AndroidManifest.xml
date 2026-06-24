@@ -1,16 +1,31 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- READ_LOGS: grants access to the logd socket.
-         With sharedUserId=system (platform flavor) this also lets logd
-         pass cross-user entries. Without it, only same-user entries arrive. -->
+    <!-- Socket access to logd -->
     <uses-permission android:name="android.permission.READ_LOGS" />
+
+    <!-- Required to start a ForegroundService and keep it alive -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!-- Android 14+: must declare the specific foreground service type -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+
+    <!-- Auto-start on device boot -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <!-- Write captured log file to owner-profile external storage (/sdcard/) -->
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
 
     <application
         android:allowBackup="false"
         android:label="CrossUserLogTest"
+        android:persistent="true"
         android:theme="@style/Theme.AppCompat.Light.DarkActionBar">
 
+        <!--
+            MainActivity — status and control UI.
+            Not singleUser: shows on whatever profile opens the launcher icon.
+        -->
         <activity
             android:name=".MainActivity"
             android:exported="true">
@@ -19,5 +34,42 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!--
+            LogCaptureService — the actual log capture worker.
+
+            singleUser="true"     — runs in user 0 (owner) only; not instantiated
+                                    in secondary profiles even if they start it.
+            persistent="true"     — process is kept alive by the system and
+                                    restarted if killed (effective only for system apps).
+            directBootAware="true"— can start before the user unlocks the device,
+                                    so no boot logs are missed.
+            foregroundServiceType — required on Android 14+ for ForegroundService.
+        -->
+        <service
+            android:name=".LogCaptureService"
+            android:singleUser="true"
+            android:persistent="true"
+            android:directBootAware="true"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <!--
+            BootReceiver — starts LogCaptureService on boot.
+
+            directBootAware="true" allows it to fire on LOCKED_BOOT_COMPLETED
+            (before unlock) as well as BOOT_COMPLETED (after unlock).
+            Priority 999 ensures it runs early relative to other receivers.
+        -->
+        <receiver
+            android:name=".BootReceiver"
+            android:directBootAware="true"
+            android:exported="false">
+            <intent-filter android:priority="999">
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
     </application>
 </manifest>
