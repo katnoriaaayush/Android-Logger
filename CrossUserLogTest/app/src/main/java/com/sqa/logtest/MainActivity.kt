@@ -3,7 +3,7 @@ package com.sqa.logtest
 import android.content.Intent
 import android.os.Bundle
 import android.os.Environment
-import android.os.Process
+import android.os.Process as AndroidProcess
 import android.widget.Button
 import android.widget.ScrollView
 import android.widget.TextView
@@ -48,7 +48,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun refresh() {
-        val myUid = Process.myUid()
+        val myUid = AndroidProcess.myUid()
         val outDir = File(Environment.getExternalStorageDirectory(), "CrossUserLogTest")
         val files = outDir.listFiles()
             ?.filter { it.name.startsWith(LogCaptureService.TARGET_PKG) }

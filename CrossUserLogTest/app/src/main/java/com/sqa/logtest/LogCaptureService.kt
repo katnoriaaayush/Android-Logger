@@ -8,7 +8,6 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Environment
 import android.os.IBinder
-import android.os.Process
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import java.io.File
@@ -29,7 +28,7 @@ class LogCaptureService : Service() {
         const val ACTION_STOP = "com.sqa.logtest.STOP"
     }
 
-    private var logcatProcess: Process? = null
+    private var logcatProcess: java.lang.Process? = null
     private var captureThread: Thread? = null
     @Volatile private var outputFile: File? = null
 
@@ -37,7 +36,7 @@ class LogCaptureService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        Log.i(TAG, "onCreate  myUid=${Process.myUid()}  myPid=${Process.myPid()}")
+        Log.i(TAG, "onCreate  myUid=${android.os.Process.myUid()}  myPid=${android.os.Process.myPid()}")
         startForeground(NOTIF_ID, buildNotification("Starting…"))
         startCapture()
     }
@@ -96,8 +95,8 @@ class LogCaptureService : Service() {
                 // ── File header ──────────────────────────────────────────────
                 writer.println("# CrossUserLogTest")
                 writer.println("# Target package : $TARGET_PKG")
-                writer.println("# Service UID    : ${Process.myUid()} " +
-                        (if (Process.myUid() == 1000) "(system — cross-user access ENABLED)"
+                writer.println("# Service UID    : ${android.os.Process.myUid()} " +
+                        (if (android.os.Process.myUid() == 1000) "(system — cross-user access ENABLED)"
                          else "(NOT 1000 — platform signing missing, cross-user access BLOCKED)"))
                 writer.println("# Target UIDs    : $targetUids")
                 writer.println("#   Logic: owner UID + (userId * 100_000) for each secondary profile")
