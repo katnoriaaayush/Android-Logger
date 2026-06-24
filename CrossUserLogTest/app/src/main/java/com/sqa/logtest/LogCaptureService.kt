@@ -129,15 +129,16 @@ class LogCaptureService : Service() {
         outDir.mkdirs()
 
         val ts = SimpleDateFormat("yyyy-MM-dd_HH-mm-ss", Locale.US).format(Date())
-        val file = File(outDir, "${TARGET_PKG}_$ts.txt")
-        outputFile = file
+        val filteredFile = File(outDir, "${TARGET_PKG}_${ts}_filtered.txt")
+        val completeFile = File(outDir, "logcat_${ts}_complete.txt")
+        outputFile = filteredFile
 
-        captureThread = Thread({ runCapture(file) }, "logcat-capture")
+        captureThread = Thread({ runCapture(filteredFile, completeFile) }, "logcat-capture")
         captureThread!!.isDaemon = true
         captureThread!!.start()
     }
 
-    private fun runCapture(outFile: File) {
+    private fun runCapture(filteredFile: File, completeFile: File) {
         try {
             // -v uid,threadtime  → date time uid pid tid level tag: message
             // -b all             → all ring buffers
@@ -146,31 +147,55 @@ class LogCaptureService : Service() {
             ))
             logcatProcess = proc
 
-            PrintWriter(outFile.bufferedWriter()).use { writer ->
-                val myUid = android.os.Process.myUid()
-                writer.println("# CrossUserLogTest — PID-based filter")
-                writer.println("# Target package : $TARGET_PKG")
-                writer.println("# Service UID    : $myUid " +
+            val myUid = android.os.Process.myUid()
+            val started = Date()
+
+            fun writeHeader(w: PrintWriter, label: String, extra: String) {
+                w.println("# CrossUserLogTest — $label")
+                w.println("# Target package : $TARGET_PKG")
+                w.println("# Service UID    : $myUid " +
                         if (myUid == 1000) "(system — cross-user PIDs visible)"
                         else "(NOT 1000 — may only see owner-profile PIDs)")
-                writer.println("# PID refresh    : every ${PID_REFRESH_MS / 1000}s via /proc scan")
-                writer.println("# Match rule     : pid in {pids of $TARGET_PKG} — exact process match,")
-                writer.println("#                  no false positives from shared UIDs or system services")
-                writer.println("# Started        : ${Date()}")
-                writer.println("# Output         : ${outFile.absolutePath}")
-                writer.println("# Format         : [userN] date time uid pid tid level tag: message")
-                writer.println("# ─────────────────────────────────────────────────────────")
-                writer.flush()
+                w.println("# PID refresh    : every ${PID_REFRESH_MS / 1000}s via /proc scan")
+                w.println("# Started        : $started")
+                w.println(extra)
+                w.println("# Format         : date time uid pid tid level tag: message")
+                w.println("# ─────────────────────────────────────────────────────────")
+                w.flush()
+            }
 
-                var lineCount = 0
-                proc.inputStream.bufferedReader().forEachLine { line ->
-                    val pid = extractPid(line) ?: return@forEachLine
-                    val userId = pidToUser[pid] ?: return@forEachLine  // not our process
+            PrintWriter(filteredFile.bufferedWriter()).use { filtered ->
+                PrintWriter(completeFile.bufferedWriter()).use { complete ->
 
-                    val profile = if (userId == 0) "[owner]" else "[user$userId]"
-                    writer.println("$profile $line")
-                    lineCount++
-                    if (lineCount % 10 == 0) writer.flush()
+                    writeHeader(filtered, "filtered (${TARGET_PKG} only)",
+                        "# Match rule     : pid in {pids of $TARGET_PKG} — multi-process & all user profiles\n" +
+                        "# Prefix         : [owner] or [userN] shows source profile")
+                    writeHeader(complete, "complete logcat dump",
+                        "# Contents       : every log line from all buffers and all processes")
+
+                    var filteredCount = 0
+                    var totalCount = 0
+
+                    proc.inputStream.bufferedReader().forEachLine { line ->
+                        // ── complete: write every line ──────────────────────
+                        complete.println(line)
+                        totalCount++
+
+                        // ── filtered: write only lines from TARGET_PKG PIDs ─
+                        val pid    = extractPid(line) ?: run {
+                            if (totalCount % 100 == 0) complete.flush()
+                            return@forEachLine
+                        }
+                        val userId = pidToUser[pid]   // null → not our process
+                        if (userId != null) {
+                            val profile = if (userId == 0) "[owner]" else "[user$userId]"
+                            filtered.println("$profile $line")
+                            filteredCount++
+                            if (filteredCount % 10 == 0) filtered.flush()
+                        }
+
+                        if (totalCount % 100 == 0) complete.flush()
+                    }
                 }
             }
         } catch (e: InterruptedException) {

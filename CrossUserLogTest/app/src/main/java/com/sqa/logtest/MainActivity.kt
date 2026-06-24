@@ -50,10 +50,9 @@ class MainActivity : AppCompatActivity() {
     private fun refresh() {
         val myUid = AndroidProcess.myUid()
         val outDir = File(Environment.getExternalStorageDirectory(), "CrossUserLogTest")
-        val files = outDir.listFiles()
-            ?.filter { it.name.startsWith(LogCaptureService.TARGET_PKG) }
-            ?.sortedByDescending { it.lastModified() }
-            ?: emptyList()
+        val allFiles = outDir.listFiles()?.sortedByDescending { it.lastModified() } ?: emptyList()
+        val filteredFiles = allFiles.filter { it.name.contains("_filtered.txt") }
+        val completeFiles = allFiles.filter { it.name.contains("_complete.txt") }
 
         tvInfo.text = buildString {
             appendLine("Process UID  : $myUid")
@@ -62,19 +61,29 @@ class MainActivity : AppCompatActivity() {
                     else "NOT 1000 — platform signing required")
             appendLine("Target pkg   : ${LogCaptureService.TARGET_PKG}")
             appendLine("Output dir   : ${outDir.absolutePath}")
-            append(    "Log files    : ${files.size} found")
+            appendLine("Filtered files : ${filteredFiles.size}  (${LogCaptureService.TARGET_PKG} logs only)")
+            append(    "Complete files : ${completeFiles.size}  (full logcat dump)")
         }
 
-        if (files.isEmpty()) {
-            tvLog.text = "No log files yet.\nStart the service and wait for the target package to emit logs."
+        val latest = filteredFiles.firstOrNull() ?: run {
+            tvLog.text = "No filtered log files yet.\nStart the service and wait for ${LogCaptureService.TARGET_PKG} to emit logs."
             return
         }
 
-        val latest = files.first()
-        val tail = latest.readLines().takeLast(50)
+        val matchingComplete = completeFiles.firstOrNull {
+            // Match by same timestamp prefix (logcat_<ts>_complete.txt ↔ pkg_<ts>_filtered.txt)
+            val ts = latest.name.removePrefix("${LogCaptureService.TARGET_PKG}_").removeSuffix("_filtered.txt")
+            it.name.contains(ts)
+        }
+
         tvLog.text = buildString {
-            appendLine("── ${latest.name}  (${latest.length() / 1024} KB) ──")
-            appendLine("Showing last ${tail.size} lines:")
+            appendLine("── FILTERED: ${latest.name}  (${latest.length() / 1024} KB) ──")
+            if (matchingComplete != null) {
+                appendLine("── COMPLETE: ${matchingComplete.name}  (${matchingComplete.length() / 1024} KB) ──")
+            }
+            appendLine()
+            val tail = latest.readLines().takeLast(40)
+            appendLine("Last ${tail.size} lines of filtered file:")
             appendLine()
             tail.forEach { appendLine(it) }
         }
