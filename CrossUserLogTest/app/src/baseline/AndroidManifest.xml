@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    BASELINE flavor — no sharedUserId.
+    Installs via normal 'adb install'. App runs as a regular app UID (10xxx).
+    Expected result: FAIL — logd will strip cross-user entries.
+    Use this to confirm the baseline before testing with platform signing.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+</manifest>

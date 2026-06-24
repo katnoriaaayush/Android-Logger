@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    SYSTEM-SIGNED flavor — declares sharedUserId="android.uid.system".
+    APK MUST be signed with the device's platform key; otherwise the
+    package manager rejects the install with INSTALL_FAILED_SHARED_USER_INCOMPATIBLE.
+
+    When correctly signed, the process runs as UID 1000 (AID_SYSTEM),
+    which is one of the three UIDs logd passes cross-user entries to.
+    Expected result: PASS — cross-user log entries should be visible.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    android:sharedUserId="android.uid.system">
+</manifest>
