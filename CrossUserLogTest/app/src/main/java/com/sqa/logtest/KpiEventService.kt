@@ -46,12 +46,12 @@ class KpiEventService : Service() {
     private val systemReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             when (intent.action) {
-                Intent.ACTION_SCREEN_ON              -> log("SCREEN_ON", "Screen turned on")
-                Intent.ACTION_SCREEN_OFF             -> log("SCREEN_OFF", "Screen turned off")
-                Intent.ACTION_SHUTDOWN               -> log("POWER_OFF", "Device shutting down")
-                Intent.ACTION_PACKAGE_ADDED          -> log("PKG_INSTALL", "Package installed: ${intent.data?.schemeSpecificPart}")
-                Intent.ACTION_PACKAGE_REMOVED        -> log("PKG_REMOVE", "Package removed: ${intent.data?.schemeSpecificPart}")
-                Intent.ACTION_LOCALE_CHANGED         -> {
+                Intent.ACTION_SCREEN_ON  -> log("SCREEN_ON", "Screen turned on")
+                Intent.ACTION_SCREEN_OFF -> log("SCREEN_OFF", "Screen turned off")
+                Intent.ACTION_SHUTDOWN   -> log("POWER_OFF", "Device shutting down")
+                Intent.ACTION_PACKAGE_ADDED   -> log("PKG_INSTALL", "Package installed: ${intent.data?.schemeSpecificPart}")
+                Intent.ACTION_PACKAGE_REMOVED -> log("PKG_REMOVE",  "Package removed: ${intent.data?.schemeSpecificPart}")
+                Intent.ACTION_LOCALE_CHANGED  -> {
                     val locale = resources.configuration.locales[0]
                     log("LOCALE_CHANGE", "System locale changed to: $locale")
                 }
@@ -63,14 +63,29 @@ class KpiEventService : Service() {
                     val device = intent.getParcelableExtra<android.hardware.usb.UsbDevice>(UsbManager.EXTRA_DEVICE)
                     log("USB_DETACH", "USB device detached: ${device?.deviceName ?: "unknown"}")
                 }
-                android.media.AudioManager.ACTION_HDMI_AUDIO_PLUG -> {
+                AudioManager.ACTION_HDMI_AUDIO_PLUG -> {
                     val plugged = intent.getIntExtra("state", 0) == 1
                     log("HDMI_PLUG", if (plugged) "HDMI plugged in" else "HDMI unplugged")
                 }
                 WifiManager.SCAN_RESULTS_AVAILABLE_ACTION -> {
-                    val wifiManager = applicationContext.getSystemService(WifiManager::class.java)
-                    val results = wifiManager?.scanResults
+                    val results = applicationContext.getSystemService(WifiManager::class.java)?.scanResults
                     log("WIFI_SCAN", "WiFi scan complete — ${results?.size ?: 0} networks found")
+                }
+                // AudioService fires this on every stream volume change (hardware buttons included).
+                // Extras: EXTRA_VOLUME_STREAM_TYPE (int), EXTRA_VOLUME_STREAM_VALUE (int)
+                "android.media.VOLUME_CHANGED_ACTION" -> {
+                    val streamType = intent.getIntExtra("android.media.EXTRA_VOLUME_STREAM_TYPE", -1)
+                    val value      = intent.getIntExtra("android.media.EXTRA_VOLUME_STREAM_VALUE", -1)
+                    val streamName = when (streamType) {
+                        AudioManager.STREAM_MUSIC        -> "MUSIC"
+                        AudioManager.STREAM_RING         -> "RING"
+                        AudioManager.STREAM_ALARM        -> "ALARM"
+                        AudioManager.STREAM_NOTIFICATION -> "NOTIFICATION"
+                        AudioManager.STREAM_VOICE_CALL   -> "VOICE_CALL"
+                        AudioManager.STREAM_SYSTEM       -> "SYSTEM"
+                        else                             -> "stream#$streamType"
+                    }
+                    log("VOLUME_$streamName", "Volume[$streamName] changed to $value")
                 }
             }
         }
@@ -87,22 +102,6 @@ class KpiEventService : Service() {
         override fun onChange(selfChange: Boolean) {
             val v = Settings.System.getInt(contentResolver, Settings.System.SCREEN_OFF_TIMEOUT, -1)
             log("SCREEN_TIMEOUT", "Screen timeout changed to: ${v}ms (${v / 1000}s)")
-        }
-    }
-
-    private val volumeMusicObserver = object : ContentObserver(mainHandler) {
-        override fun onChange(selfChange: Boolean) {
-            val v = getSystemService(AudioManager::class.java)
-                .getStreamVolume(AudioManager.STREAM_MUSIC)
-            log("VOLUME_MUSIC", "Music volume changed to: $v")
-        }
-    }
-
-    private val volumeRingObserver = object : ContentObserver(mainHandler) {
-        override fun onChange(selfChange: Boolean) {
-            val v = getSystemService(AudioManager::class.java)
-                .getStreamVolume(AudioManager.STREAM_RING)
-            log("VOLUME_RING", "Ring volume changed to: $v")
         }
     }
 
@@ -154,20 +153,7 @@ class KpiEventService : Service() {
     // ─── registration ────────────────────────────────────────────────────────────
 
     private fun registerListeners() {
-        val filter = IntentFilter().apply {
-            addAction(Intent.ACTION_SCREEN_ON)
-            addAction(Intent.ACTION_SCREEN_OFF)
-            addAction(Intent.ACTION_SHUTDOWN)
-            addAction(Intent.ACTION_PACKAGE_ADDED)
-            addAction(Intent.ACTION_PACKAGE_REMOVED)
-            addAction(Intent.ACTION_LOCALE_CHANGED)
-            addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED)
-            addAction(UsbManager.ACTION_USB_DEVICE_DETACHED)
-            addAction(android.media.AudioManager.ACTION_HDMI_AUDIO_PLUG)
-            addAction(WifiManager.SCAN_RESULTS_AVAILABLE_ACTION)
-            addDataScheme("package")   // required for PACKAGE_ADDED/REMOVED
-        }
-        // Screen and locale intents don't use data URIs — need separate receiver
+        // Intents without a data URI (screen, locale, USB, audio, wifi, volume)
         val filterNoData = IntentFilter().apply {
             addAction(Intent.ACTION_SCREEN_ON)
             addAction(Intent.ACTION_SCREEN_OFF)
@@ -175,9 +161,12 @@ class KpiEventService : Service() {
             addAction(Intent.ACTION_LOCALE_CHANGED)
             addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED)
             addAction(UsbManager.ACTION_USB_DEVICE_DETACHED)
-            addAction(android.media.AudioManager.ACTION_HDMI_AUDIO_PLUG)
+            addAction(AudioManager.ACTION_HDMI_AUDIO_PLUG)
             addAction(WifiManager.SCAN_RESULTS_AVAILABLE_ACTION)
+            // AudioService broadcasts this on every volume key press / API call
+            addAction("android.media.VOLUME_CHANGED_ACTION")
         }
+        // Package intents require addDataScheme("package") in a separate filter
         val filterPkg = IntentFilter().apply {
             addAction(Intent.ACTION_PACKAGE_ADDED)
             addAction(Intent.ACTION_PACKAGE_REMOVED)
@@ -190,10 +179,6 @@ class KpiEventService : Service() {
             Settings.System.getUriFor(Settings.System.SCREEN_BRIGHTNESS), false, brightnessObserver)
         contentResolver.registerContentObserver(
             Settings.System.getUriFor(Settings.System.SCREEN_OFF_TIMEOUT), false, timeoutObserver)
-        contentResolver.registerContentObserver(
-            Settings.System.getUriFor("volume_music"), false, volumeMusicObserver)
-        contentResolver.registerContentObserver(
-            Settings.System.getUriFor("volume_ring"), false, volumeRingObserver)
 
         val cm = getSystemService(ConnectivityManager::class.java)
         cm.registerNetworkCallback(NetworkRequest.Builder().build(), networkCallback)
@@ -203,8 +188,6 @@ class KpiEventService : Service() {
         try { unregisterReceiver(systemReceiver) } catch (_: Exception) {}
         contentResolver.unregisterContentObserver(brightnessObserver)
         contentResolver.unregisterContentObserver(timeoutObserver)
-        contentResolver.unregisterContentObserver(volumeMusicObserver)
-        contentResolver.unregisterContentObserver(volumeRingObserver)
         try {
             getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(networkCallback)
         } catch (_: Exception) {}
