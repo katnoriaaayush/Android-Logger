@@ -60,11 +60,8 @@ class LogCaptureService : Service() {
     // ─────────────────────────────────────────────────────────────────────────
 
     private fun startCapture() {
-        val targetUids = resolveTargetUids()
-        Log.i(TAG, "Target UIDs for $TARGET_PKG: $targetUids")
+        val appId = resolveTargetAppId()
 
-        // Owner-profile external storage = /sdcard/ = /storage/emulated/0/
-        // Accessible by adb pull, file managers, etc.
         val outDir = File(Environment.getExternalStorageDirectory(), "CrossUserLogTest")
         outDir.mkdirs()
 
@@ -74,57 +71,55 @@ class LogCaptureService : Service() {
 
         updateNotification("Writing → ${file.name}")
 
-        captureThread = Thread({
-            runCapture(file, targetUids)
-        }, "logcat-capture")
+        captureThread = Thread({ runCapture(file, appId) }, "logcat-capture")
         captureThread!!.isDaemon = true
         captureThread!!.start()
     }
 
-    private fun runCapture(outFile: File, targetUids: Set<Int>) {
+    private fun runCapture(outFile: File, appId: Int) {
         try {
-            // -v uid,threadtime — adds UID column and full timestamp to each line
-            // -b all            — read main + system + crash + radio + kernel buffers
-            // (no -d)           — stream continuously, don't dump-and-exit
             val proc = Runtime.getRuntime().exec(arrayOf(
                 "logcat", "-v", "uid,threadtime", "-b", "all"
             ))
             logcatProcess = proc
 
             PrintWriter(outFile.bufferedWriter()).use { writer ->
-                // ── File header ──────────────────────────────────────────────
+                val myUid = android.os.Process.myUid()
                 writer.println("# CrossUserLogTest")
                 writer.println("# Target package : $TARGET_PKG")
-                writer.println("# Service UID    : ${android.os.Process.myUid()} " +
-                        (if (android.os.Process.myUid() == 1000) "(system — cross-user access ENABLED)"
-                         else "(NOT 1000 — platform signing missing, cross-user access BLOCKED)"))
-                writer.println("# Target UIDs    : $targetUids")
-                writer.println("#   Logic: owner UID + (userId * 100_000) for each secondary profile")
+                writer.println("# Service UID    : $myUid " +
+                        if (myUid == 1000) "(system — cross-user access ENABLED)"
+                        else "(NOT 1000 — platform signing missing, cross-user access BLOCKED)")
+                writer.println("# Match rule     : uid % 100_000 == $appId")
+                writer.println("#   This matches $TARGET_PKG in ALL user profiles regardless of")
+                writer.println("#   their user ID (Android assigns secondary user IDs from 10+,")
+                writer.println("#   so probing 1..9 would miss every real secondary profile).")
                 writer.println("# Started        : ${Date()}")
                 writer.println("# Output         : ${outFile.absolutePath}")
-                writer.println("# Format         : date time uid pid tid level tag: message")
-                writer.println("#")
-                writer.println("# Lines below are filtered to $TARGET_PKG only.")
+                writer.println("# Format         : [userN] date time uid pid tid level tag: message")
                 writer.println("# ─────────────────────────────────────────────────────────")
                 writer.flush()
 
-                if (targetUids.isEmpty()) {
-                    writer.println("# WARNING: $TARGET_PKG not found in any profile — no UID to filter on.")
-                    writer.println("# Install the target package and restart this service.")
+                if (appId < 0) {
+                    writer.println("# WARNING: $TARGET_PKG not found in owner profile — nothing to capture.")
+                    writer.println("# Install the package and restart this service.")
                     writer.flush()
-                    Log.w(TAG, "$TARGET_PKG not installed anywhere — nothing to capture")
+                    Log.w(TAG, "$TARGET_PKG not installed — appId=-1, capture aborted")
                     return
                 }
 
-                // ── Stream logcat lines ──────────────────────────────────────
+                Log.i(TAG, "Streaming logcat — matching uid%100_000==$appId for $TARGET_PKG")
                 var lineCount = 0
                 proc.inputStream.bufferedReader().forEachLine { line ->
-                    if (matchesTarget(line, targetUids)) {
-                        writer.println(line)
-                        lineCount++
-                        // Flush every 10 lines so the file is useful even if the service dies
-                        if (lineCount % 10 == 0) writer.flush()
-                    }
+                    val uid = extractUid(line) ?: return@forEachLine
+                    if (uid % 100_000 != appId) return@forEachLine
+
+                    // Prefix each line with which user profile it came from
+                    val userId = uid / 100_000
+                    val prefix = if (userId == 0) "[owner]" else "[user$userId]"
+                    writer.println("$prefix $line")
+                    lineCount++
+                    if (lineCount % 10 == 0) writer.flush()
                 }
             }
         } catch (e: InterruptedException) {
@@ -134,47 +129,35 @@ class LogCaptureService : Service() {
         }
     }
 
-    // ── UID resolution ────────────────────────────────────────────────────────
+    // ── AppId resolution ──────────────────────────────────────────────────────
     //
-    // Android multi-user UID formula:
-    //   userN_uid = userId * 100_000 + (owner_uid % 100_000)
+    // Android multi-user UID formula:  fullUid = userId * 100_000 + appId
     //
-    // We don't need MANAGE_USERS or hidden APIs — we compute the expected UID
-    // for each user slot (0–9) from the owner's base UID. If the package isn't
-    // installed in a given profile, no log lines will match that slot's UID,
-    // so probing unused slots is harmless.
+    // We only need the appId (uid % 100_000). Matching on this catches
+    // the same package in every user profile no matter what userId Android
+    // assigned (secondary users start at ID 10, not 1, in AOSP).
 
-    private fun resolveTargetUids(): Set<Int> {
-        val ownerUid = try {
-            packageManager.getApplicationInfo(TARGET_PKG, 0).uid
+    private fun resolveTargetAppId(): Int {
+        return try {
+            val ownerUid = packageManager.getApplicationInfo(TARGET_PKG, 0).uid
+            val appId = ownerUid % 100_000
+            Log.i(TAG, "$TARGET_PKG owner uid=$ownerUid  appId=$appId")
+            appId
         } catch (e: PackageManager.NameNotFoundException) {
             Log.w(TAG, "$TARGET_PKG not installed in owner profile")
-            return emptySet()
-        }
-
-        Log.i(TAG, "$TARGET_PKG owner UID: $ownerUid")
-        val baseOffset = ownerUid % 100_000
-
-        return buildSet {
-            add(ownerUid)                               // user 0 (owner)
-            for (userId in 1..9) {                     // secondary profiles 1–9
-                add(userId * 100_000 + baseOffset)     // e.g. user 10 → 1_000_000 + offset
-            }
+            -1
         }
     }
 
-    // ── Line matcher ──────────────────────────────────────────────────────────
+    // ── Line parser ───────────────────────────────────────────────────────────
     //
     // logcat -v uid,threadtime line format:
     //   MM-DD HH:MM:SS.mmm  <uid>  <pid>  <tid>  <L>  <tag>: <message>
-    //   e.g.: 07-15 10:23:45.123  10234  1234  5678  D  MyTag: hello
 
     private val lineRe = Regex("""^\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+\s+(\d+)\s+""")
 
-    private fun matchesTarget(line: String, targetUids: Set<Int>): Boolean {
-        val uid = lineRe.find(line)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: return false
-        return uid in targetUids
-    }
+    private fun extractUid(line: String): Int? =
+        lineRe.find(line)?.groupValues?.getOrNull(1)?.toIntOrNull()
 
     // ── Notification ──────────────────────────────────────────────────────────
 
