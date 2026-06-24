@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    android:sharedUserId="android.uid.system" makes this process run as
+    UID 1000 (AID_SYSTEM) — one of the three UIDs logd allows to receive
+    cross-user log entries (root/0, system/1000, log/1007).
+
+    REQUIREMENT: The APK must be signed with the platform key of the target
+    device. On a stock OEM device you need the OEM's platform.pk8 / x509.pem.
+    On an AOSP build / emulator the public AOSP test keys work.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    android:sharedUserId="android.uid.system">
+
+    <!-- READ_LOGS: grants access to the logd socket (necessary but not sufficient
+         for cross-user entries — the UID check inside logd is what matters). -->
+    <uses-permission android:name="android.permission.READ_LOGS" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+
+    <application
+        android:allowBackup="false"
+        android:label="CrossUserLogTest"
+        android:theme="@style/Theme.AppCompat.Light.DarkActionBar">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
