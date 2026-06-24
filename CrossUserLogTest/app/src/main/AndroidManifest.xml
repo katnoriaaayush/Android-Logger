@@ -16,6 +16,13 @@
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="28" />
 
+    <!-- KpiEventService: read Settings values via ContentObserver -->
+    <uses-permission android:name="android.permission.READ_SETTINGS" />
+    <!-- ConnectivityManager.registerNetworkCallback requires ACCESS_NETWORK_STATE -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- WiFi scan results -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+
     <application
         android:allowBackup="false"
         android:label="CrossUserLogTest"
@@ -51,6 +58,15 @@
             android:singleUser="true"
             android:persistent="true"
             android:directBootAware="true"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <!--
+            KpiEventService — listens for event-based KPIs via framework callbacks.
+            Registers BroadcastReceivers, ContentObservers, and NetworkCallback at runtime.
+        -->
+        <service
+            android:name=".KpiEventService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 
