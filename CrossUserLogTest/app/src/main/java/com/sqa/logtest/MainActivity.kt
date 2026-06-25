@@ -5,8 +5,11 @@ import android.app.usage.UsageStatsManager
 import android.content.Intent
 import android.os.Bundle
 import android.os.Environment
+import android.os.Handler
+import android.os.Looper
 import android.os.Process as AndroidProcess
 import android.widget.Button
+import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
@@ -19,7 +22,9 @@ import java.util.Locale
 class MainActivity : AppCompatActivity() {
 
     private lateinit var tvInfo: TextView
+    private lateinit var tvLiveStatus: TextView
     private lateinit var tvLog: TextView
+    private lateinit var scrollLog: ScrollView
     private lateinit var btnStart: Button
     private lateinit var btnStop: Button
     private lateinit var btnRefresh: Button
@@ -27,12 +32,23 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnKpiStop: Button
     private lateinit var btnFetchUsage: Button
 
+    private val liveHandler = Handler(Looper.getMainLooper())
+    private var liveRunnable: Runnable? = null
+    private var kpiActive = false
+    private var lastLogLength = -1   // detect new content to trigger auto-scroll
+
+    companion object {
+        const val LIVE_INTERVAL_MS = 1500L
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
         tvInfo        = findViewById(R.id.tv_info)
+        tvLiveStatus  = findViewById(R.id.tv_live_status)
         tvLog         = findViewById(R.id.tv_log)
+        scrollLog     = findViewById(R.id.scroll_log)
         btnStart      = findViewById(R.id.btn_start)
         btnStop       = findViewById(R.id.btn_stop)
         btnRefresh    = findViewById(R.id.btn_refresh)
@@ -42,23 +58,25 @@ class MainActivity : AppCompatActivity() {
 
         btnStart.setOnClickListener {
             startForegroundService(Intent(this, LogCaptureService::class.java))
-            refresh()
+            refreshInfoPanel()
         }
         btnStop.setOnClickListener {
             sendBroadcast(Intent(LogCaptureService.ACTION_STOP).apply { `package` = packageName })
             stopService(Intent(this, LogCaptureService::class.java))
-            refresh()
+            refreshInfoPanel()
         }
-        btnRefresh.setOnClickListener { refresh() }
+        btnRefresh.setOnClickListener { refreshInfoPanel() }
 
         btnKpiStart.setOnClickListener {
             startForegroundService(Intent(this, KpiEventService::class.java))
-            refresh()
+            kpiActive = true
+            refreshInfoPanel()
         }
         btnKpiStop.setOnClickListener {
             sendBroadcast(Intent(KpiEventService.ACTION_STOP).apply { `package` = packageName })
             stopService(Intent(this, KpiEventService::class.java))
-            refresh()
+            kpiActive = false
+            refreshInfoPanel()
         }
 
         btnFetchUsage.setOnClickListener {
@@ -68,20 +86,107 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ─── app usage stats ────────────────────────────────────────────────────────
+    override fun onResume() {
+        super.onResume()
+        refreshInfoPanel()
+        startLivePreview()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        stopLivePreview()
+    }
+
+    // ─── live preview ────────────────────────────────────────────────────────────
+
+    private fun startLivePreview() {
+        stopLivePreview()
+        val r = object : Runnable {
+            override fun run() {
+                updateLiveView()
+                liveHandler.postDelayed(this, LIVE_INTERVAL_MS)
+            }
+        }
+        liveRunnable = r
+        liveHandler.post(r)
+    }
+
+    private fun stopLivePreview() {
+        liveRunnable?.let { liveHandler.removeCallbacks(it) }
+        liveRunnable = null
+    }
+
+    private fun updateLiveView() {
+        val outDir = File(Environment.getExternalStorageDirectory(), "CrossUserLogTest")
+        val allFiles = outDir.listFiles()?.sortedByDescending { it.lastModified() } ?: emptyList()
+        val latestKpi   = allFiles.firstOrNull { it.name.startsWith("kpi_events_") }
+        val latestUsage = allFiles.firstOrNull { it.name.startsWith("usage_stats_") }
+
+        // Status badge
+        if (kpiActive && latestKpi != null) {
+            val eventCount = latestKpi.readLines().count { !it.startsWith("#") && it.isNotBlank() }
+            val age = ((System.currentTimeMillis() - latestKpi.lastModified()) / 1000).coerceAtLeast(0)
+            tvLiveStatus.text = "●  LIVE  —  $eventCount events  |  file updated ${age}s ago"
+            tvLiveStatus.setTextColor(0xFF4CAF50.toInt())
+        } else if (kpiActive) {
+            tvLiveStatus.text = "●  LIVE  —  waiting for first event…"
+            tvLiveStatus.setTextColor(0xFF4CAF50.toInt())
+        } else if (latestKpi != null) {
+            val eventCount = latestKpi.readLines().count { !it.startsWith("#") && it.isNotBlank() }
+            tvLiveStatus.text = "◌  stopped  —  last session: $eventCount events  (${latestKpi.name})"
+            tvLiveStatus.setTextColor(0xFF9E9E9E.toInt())
+        } else {
+            tvLiveStatus.text = "◌  KPI service not running"
+            tvLiveStatus.setTextColor(0xFF9E9E9E.toInt())
+        }
+
+        // Log content
+        if (latestKpi == null && latestUsage == null) {
+            tvLog.text = "No data yet.\nStart KPI Logging or tap Fetch App Usage Stats."
+            lastLogLength = -1
+            return
+        }
+
+        val newText = buildString {
+            if (latestKpi != null) {
+                val dataLines = latestKpi.readLines().filter { !it.startsWith("#") && it.isNotBlank() }
+                appendLine("KPI EVENTS  ·  ${latestKpi.name}  ·  ${dataLines.size} events")
+                appendLine("─".repeat(70))
+                dataLines.takeLast(80).forEach { appendLine(it) }
+            }
+
+            if (latestUsage != null) {
+                if (latestKpi != null) appendLine()
+                val dataLines = latestUsage.readLines().filter { !it.startsWith("#") && it.isNotBlank() }
+                appendLine("APP USAGE  ·  ${latestUsage.name}  ·  ${dataLines.size} apps")
+                appendLine("─".repeat(70))
+                dataLines.take(30).forEach { appendLine(it) }
+                if (dataLines.size > 30) appendLine("  … ${dataLines.size - 30} more apps in file")
+            }
+        }
+
+        val newLength = newText.length
+        tvLog.text = newText
+
+        // Auto-scroll to bottom when KPI is live and new events have arrived
+        if (kpiActive && newLength != lastLogLength) {
+            scrollLog.post { scrollLog.fullScroll(ScrollView.FOCUS_DOWN) }
+        }
+        lastLogLength = newLength
+    }
+
+    // ─── app usage stats ─────────────────────────────────────────────────────────
 
     private fun fetchUsageStats() {
         val usm = getSystemService(UsageStatsManager::class.java)
         val now = System.currentTimeMillis()
         val day = 24L * 60 * 60 * 1000
 
-        // Aggregate runtime over the last 7 days, one row per app
         val stats = usm.queryUsageStats(UsageStatsManager.INTERVAL_DAILY, now - 7 * day, now)
             ?.filter { it.totalTimeInForeground > 0 }
             ?.sortedByDescending { it.totalTimeInForeground }
             ?: emptyList()
 
-        // Launch count = ACTIVITY_RESUMED events in the last 24 hours
         val launchCounts = mutableMapOf<String, Int>()
         val usageEvents = usm.queryEvents(now - day, now)
         val ev = UsageEvents.Event()
@@ -92,7 +197,6 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // Write to file
         val outDir = File(Environment.getExternalStorageDirectory(), "CrossUserLogTest")
         outDir.mkdirs()
         val ts = SimpleDateFormat("yyyy-MM-dd_HH-mm-ss", Locale.US).format(Date())
@@ -103,7 +207,7 @@ class MainActivity : AppCompatActivity() {
             w.println("# Runtime  : last 7 days (INTERVAL_DAILY)")
             w.println("# Launches : ACTIVITY_RESUMED events in last 24 hours")
             w.println("# Format   : rank | package | runtime_7d | launches_24h | last_used")
-            w.println("# ──────────────────────────────────────────────────────────────────")
+            w.println("# ─────────────────────────────────────────────────────────────────")
             stats.forEachIndexed { i, stat ->
                 val runtime  = formatDuration(stat.totalTimeInForeground)
                 val launches = launchCounts[stat.packageName] ?: 0
@@ -112,29 +216,13 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // Update UI on main thread
-        val summary = buildString {
-            appendLine("── USAGE STATS: ${file.name} ──")
-            appendLine("${stats.size} apps  |  runtime=7d  |  launches=24h")
-            appendLine()
-            appendLine("${"#".padStart(3)}  ${"Package".padEnd(40)}  ${"Runtime".padEnd(10)}  ${"Launches".padEnd(8)}  Last used")
-            appendLine("─".repeat(80))
-            stats.take(40).forEachIndexed { i, stat ->
-                val runtime  = formatDuration(stat.totalTimeInForeground)
-                val launches = launchCounts[stat.packageName] ?: 0
-                val lastUsed = SimpleDateFormat("MM-dd HH:mm", Locale.US).format(Date(stat.lastTimeUsed))
-                val pkg = stat.packageName.let { if (it.length > 40) "…${it.takeLast(39)}" else it }
-                appendLine("${(i + 1).toString().padStart(3)}  ${pkg.padEnd(40)}  ${runtime.padEnd(10)}  ${launches.toString().padEnd(8)}  $lastUsed")
-            }
-            if (stats.size > 40) appendLine("… and ${stats.size - 40} more apps written to file")
-        }
-
+        // File written — live loop picks it up on next tick; just reset scroll + toast
         runOnUiThread {
-            tvLog.text = summary
+            lastLogLength = -1   // force scroll-to-top on next live tick
             btnFetchUsage.isEnabled = true
             btnFetchUsage.text = "Fetch App Usage Stats (frequency + runtime)"
             refreshInfoPanel()
-            Toast.makeText(this, "Usage stats saved: ${file.name}", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Saved ${stats.size} apps → ${file.name}", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -149,68 +237,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ─── refresh ────────────────────────────────────────────────────────────────
-
-    override fun onResume() {
-        super.onResume()
-        refresh()
-    }
-
-    private fun refresh() {
-        refreshInfoPanel()
-
-        val outDir = File(Environment.getExternalStorageDirectory(), "CrossUserLogTest")
-        val allFiles = outDir.listFiles()?.sortedByDescending { it.lastModified() } ?: emptyList()
-        val filteredFiles = allFiles.filter { it.name.contains("_filtered.txt") }
-        val completeFiles = allFiles.filter { it.name.contains("_complete.txt") }
-        val kpiFiles      = allFiles.filter { it.name.startsWith("kpi_events_") }
-        val usageFiles    = allFiles.filter { it.name.startsWith("usage_stats_") }
-
-        val latestLog   = filteredFiles.firstOrNull()
-        val latestKpi   = kpiFiles.firstOrNull()
-        val latestUsage = usageFiles.firstOrNull()
-
-        if (latestLog == null && latestKpi == null && latestUsage == null) {
-            tvLog.text = "No log files yet.\nUse the buttons above to start capturing."
-            return
-        }
-
-        tvLog.text = buildString {
-            if (latestLog != null) {
-                val matchingComplete = completeFiles.firstOrNull {
-                    val t = latestLog.name
-                        .removePrefix("${LogCaptureService.TARGET_PKG}_")
-                        .removeSuffix("_filtered.txt")
-                    it.name.contains(t)
-                }
-                appendLine("── FILTERED: ${latestLog.name}  (${latestLog.length() / 1024} KB) ──")
-                if (matchingComplete != null)
-                    appendLine("── COMPLETE: ${matchingComplete.name}  (${matchingComplete.length() / 1024} KB) ──")
-                appendLine()
-                val tail = latestLog.readLines().takeLast(25)
-                appendLine("Last ${tail.size} lines of filtered log:")
-                tail.forEach { appendLine(it) }
-            }
-
-            if (latestKpi != null) {
-                if (latestLog != null) appendLine()
-                appendLine("── KPI EVENTS: ${latestKpi.name}  (${latestKpi.length() / 1024} KB) ──")
-                appendLine()
-                val tail = latestKpi.readLines().takeLast(15)
-                appendLine("Last ${tail.size} KPI events:")
-                tail.forEach { appendLine(it) }
-            }
-
-            if (latestUsage != null) {
-                if (latestLog != null || latestKpi != null) appendLine()
-                appendLine("── USAGE STATS: ${latestUsage.name}  (${latestUsage.length() / 1024} KB) ──")
-                appendLine()
-                val tail = latestUsage.readLines().drop(5).take(20)
-                appendLine("Top apps (last capture):")
-                tail.forEach { appendLine(it) }
-            }
-        }
-    }
+    // ─── info panel ──────────────────────────────────────────────────────────────
 
     private fun refreshInfoPanel() {
         val myUid = AndroidProcess.myUid()
@@ -221,10 +248,10 @@ class MainActivity : AppCompatActivity() {
                     if (myUid == 1000) "OK ✓ system" else "NOT 1000 — platform signing required")
             appendLine("Target pkg   : ${LogCaptureService.TARGET_PKG}")
             appendLine("Output dir   : ${outDir.absolutePath}")
-            appendLine("Filtered     : ${allFiles.count { it.name.contains("_filtered.txt") }}  |  " +
-                       "Complete: ${allFiles.count { it.name.contains("_complete.txt") }}")
-            appendLine("KPI events   : ${allFiles.count { it.name.startsWith("kpi_events_") }}  |  " +
-                       "Usage stats: ${allFiles.count { it.name.startsWith("usage_stats_") }}")
+            appendLine("Filtered : ${allFiles.count { it.name.contains("_filtered.txt") }}  " +
+                       "Complete : ${allFiles.count { it.name.contains("_complete.txt") }}")
+            append(    "KPI files: ${allFiles.count { it.name.startsWith("kpi_events_") }}  " +
+                       "Usage files: ${allFiles.count { it.name.startsWith("usage_stats_") }}")
         }
     }
 }

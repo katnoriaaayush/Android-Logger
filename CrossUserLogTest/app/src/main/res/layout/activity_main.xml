@@ -81,12 +81,26 @@
         android:text="Fetch App Usage Stats (frequency + runtime)"
         android:backgroundTint="#6a4eff" />
 
-    <!-- Log tail viewer -->
+    <!-- Live status badge -->
+    <TextView
+        android:id="@+id/tv_live_status"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="10dp"
+        android:fontFamily="monospace"
+        android:textSize="11sp"
+        android:paddingStart="6dp"
+        android:paddingEnd="6dp"
+        android:text="◌  KPI service not running"
+        android:textColor="#9E9E9E" />
+
+    <!-- Live log viewer -->
     <ScrollView
+        android:id="@+id/scroll_log"
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1"
-        android:layout_marginTop="12dp">
+        android:layout_marginTop="4dp">
 
         <TextView
             android:id="@+id/tv_log"
@@ -97,7 +111,7 @@
             android:padding="8dp"
             android:background="#1a1a2e"
             android:textColor="#e0e0ff"
-            android:text="No logs yet." />
+            android:text="No data yet." />
     </ScrollView>
 
 </LinearLayout>
