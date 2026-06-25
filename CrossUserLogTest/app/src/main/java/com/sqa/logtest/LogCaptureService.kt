@@ -132,14 +132,14 @@ class LogCaptureService : Service() {
             val myUid = android.os.Process.myUid()
             val started = Date()
 
-            // UID resolved once — only used in FILTER_UID mode
+            // Resolved once for both modes
             val targetAppId: Int = try {
                 packageManager.getPackageUid(TARGET_PKG, 0) % 100_000
             } catch (_: Exception) { -1 }
 
             fun writeHeader(w: PrintWriter, label: String, extra: String) {
                 w.println("# CrossUserLogTest — $label")
-                w.println("# Target package : $TARGET_PKG")
+                w.println("# Target package : $TARGET_PKG  (appId=$targetAppId)")
                 w.println("# Filter mode    : $filterMode")
                 w.println("# Service UID    : $myUid " +
                         if (myUid == 1000) "(system)" else "(NOT 1000)")
@@ -154,7 +154,8 @@ class LogCaptureService : Service() {
                 PrintWriter(completeFile.bufferedWriter()).use { complete ->
 
                     val filterDesc = when (filterMode) {
-                        FILTER_PID -> "pid in {pids of $TARGET_PKG} via /proc scan every ${PID_REFRESH_MS/1000}s"
+                        FILTER_PID -> "user-0: pid in pidToUser (/proc scan every ${PID_REFRESH_MS/1000}s)" +
+                                      " | secondary users: uid%100_000==appId (SELinux blocks /proc cross-user)"
                         FILTER_UID -> "uid % 100_000 == $targetAppId (PackageManager.getPackageUid)"
                         else       -> filterMode
                     }
@@ -169,17 +170,28 @@ class LogCaptureService : Service() {
                         totalCount++
                         if (totalCount % 100 == 0) complete.flush()
 
+                        val uid = extractUid(line) ?: return@forEachLine
+
                         when (filterMode) {
                             FILTER_PID -> {
-                                val pid    = extractPid(line) ?: return@forEachLine
-                                val userId = pidToUser[pid] ?: return@forEachLine
-                                val profile = if (userId == 0) "[owner]" else "[user$userId]"
-                                filtered.println("$profile $line")
+                                val userId = uid / 100_000
+                                if (userId == 0) {
+                                    // Owner profile: /proc scan works — use precise PID map
+                                    val pid = extractPid(line) ?: return@forEachLine
+                                    if (pidToUser[pid] == null) return@forEachLine
+                                    filtered.println("[owner] $line")
+                                } else {
+                                    // Secondary user: SELinux blocks /proc reads from platform_app
+                                    // domain even at UID 1000. Fall back to UID modulo — secondary-
+                                    // user system services use UIDs like 1001000, 1001001 which
+                                    // never match a regular app's appId.
+                                    if (uid % 100_000 != targetAppId) return@forEachLine
+                                    filtered.println("[user$userId] $line")
+                                }
                                 filteredCount++
                                 if (filteredCount % 10 == 0) filtered.flush()
                             }
                             FILTER_UID -> {
-                                val uid    = extractUid(line) ?: return@forEachLine
                                 if (uid % 100_000 != targetAppId) return@forEachLine
                                 val userId = uid / 100_000
                                 val profile = if (userId == 0) "[owner]" else "[user$userId]"
