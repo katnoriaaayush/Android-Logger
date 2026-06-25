@@ -72,6 +72,15 @@
             android:backgroundTint="#ff6b6b" />
     </LinearLayout>
 
+    <!-- App usage stats -->
+    <Button
+        android:id="@+id/btn_fetch_usage"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:text="Fetch App Usage Stats (frequency + runtime)"
+        android:backgroundTint="#6a4eff" />
+
     <!-- Log tail viewer -->
     <ScrollView
         android:layout_width="match_parent"
