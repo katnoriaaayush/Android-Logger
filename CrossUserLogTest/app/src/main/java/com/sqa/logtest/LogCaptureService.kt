@@ -1,5 +1,6 @@
 package com.sqa.logtest
 
+import android.app.ActivityManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -27,7 +28,7 @@ class LogCaptureService : Service() {
         const val EXTRA_FILTER_MODE = "filter_mode"
         const val FILTER_PID        = "pid"     // batch /proc scan, 15-s window
         const val FILTER_UID        = "uid"     // UID modulo only, no PID check
-        const val FILTER_HYBRID     = "hybrid"  // UID pre-filter + on-demand PID verify
+        const val FILTER_HYBRID     = "hybrid"  // UID pre-filter + ActivityManager PID verify
         const val PID_REFRESH_MS    = 15_000L
     }
 
@@ -40,9 +41,9 @@ class LogCaptureService : Service() {
     // FILTER_PID: pid → userId (0 = owner, 10 = user10, …)
     private val pidToUser = ConcurrentHashMap<Int, Int>()
 
-    // FILTER_HYBRID: pid → true (is TARGET_PKG process) / false (is not)
-    // Absent = not yet verified. Never stores null — ConcurrentHashMap forbids it.
-    private val pidCache = ConcurrentHashMap<Int, Boolean>()
+    // FILTER_HYBRID: set of PIDs belonging to TARGET_PKG, refreshed every PID_REFRESH_MS
+    // via ActivityManager.getRunningAppProcesses() — works across all user profiles.
+    @Volatile private var amPidSet: Set<Int> = emptySet()
 
     // ─── lifecycle ───────────────────────────────────────────────────────────────
 
@@ -61,7 +62,7 @@ class LogCaptureService : Service() {
             Log.i(TAG, "filterMode=$filterMode")
             when (filterMode) {
                 FILTER_PID    -> startBgThread("pid-refresher",  ::refreshPids)
-                FILTER_HYBRID -> startBgThread("pid-cache-cleaner", ::cleanPidCache)
+                FILTER_HYBRID -> startBgThread("am-pid-refresher", ::refreshAmPids)
             }
             startCapture()
         }
@@ -110,43 +111,18 @@ class LogCaptureService : Service() {
         updateNotification(if (found.isNotEmpty()) "[PID] ${found.size} process(es)" else "[PID] Waiting…")
     }
 
-    // ─── FILTER_HYBRID: on-demand PID verification ───────────────────────────────
+    // ─── FILTER_HYBRID: ActivityManager PID refresh ──────────────────────────────
 
-    // Reads /proc/<pid>/cmdline the first time we encounter a PID that passed the
-    // UID pre-filter. Result is cached so /proc is read at most once per PID.
-    //
-    // Fallback when /proc is unreadable (process died between log write and our
-    // read, or SELinux denies access from platform_app domain):
-    //   • Regular app  (appId ≥ 10 000) → trust the UID filter.  Each app gets a
-    //     unique appId per user profile, so a UID match means it's the right app.
-    //   • System/shared app (appId < 10 000) → drop the line.  Many processes share
-    //     UID 1000 (or similar); accepting on UID alone would flood with system logs.
-    //
-    // The result is NOT cached on fallback so we retry /proc on the next line from
-    // the same PID (handles transient cases where /proc isn't readable yet).
-    private fun verifyPid(pid: Int, targetAppId: Int): Boolean {
-        pidCache[pid]?.let { return it }
-
-        return try {
-            val raw = File("/proc/$pid/cmdline").readBytes()
-            val end = raw.indexOfFirst { it == 0.toByte() }.let { if (it < 0) raw.size else it }
-            val name = raw.copyOf(end).toString(Charsets.UTF_8)
-            val isTarget = name == TARGET_PKG || name.startsWith("$TARGET_PKG:")
-            pidCache[pid] = isTarget
-            isTarget
-        } catch (_: Exception) {
-            // Don't cache — let next line retry
-            targetAppId >= 10_000   // trust UID only for regular (unique-UID) apps
-        }
-    }
-
-    // Remove dead PIDs from cache so a new process reusing the same PID number
-    // gets a fresh verification rather than a stale cached result.
-    private fun cleanPidCache() {
-        val before = pidCache.size
-        pidCache.keys.removeAll { pid -> !File("/proc/$pid").exists() }
-        Log.d(TAG, "pidCache: $before → ${pidCache.size} entries after cleanup")
-        updateNotification("[Hybrid] ${pidCache.count { it.value }} target PIDs cached")
+    private fun refreshAmPids() {
+        val am = getSystemService(ActivityManager::class.java)
+        val newSet = am.runningAppProcesses
+            ?.filter { it.processName == TARGET_PKG || it.processName.startsWith("$TARGET_PKG:") }
+            ?.map { it.pid }
+            ?.toHashSet()
+            ?: hashSetOf()
+        amPidSet = newSet
+        Log.d(TAG, "AM PIDs for $TARGET_PKG: $newSet")
+        updateNotification(if (newSet.isNotEmpty()) "[Hybrid] ${newSet.size} PID(s) via AM" else "[Hybrid] Waiting for $TARGET_PKG…")
     }
 
     // ─── logcat capture ──────────────────────────────────────────────────────────
@@ -189,8 +165,7 @@ class LogCaptureService : Service() {
             val ruleDesc = when (filterMode) {
                 FILTER_PID    -> "user-0: pid∈pidToUser (/proc batch scan every ${PID_REFRESH_MS/1000}s) | secondary: uid%100_000==appId"
                 FILTER_UID    -> "uid%100_000==$targetAppId (all users, no PID check)"
-                FILTER_HYBRID -> "uid%100_000==$targetAppId → /proc/<pid>/cmdline on-demand; " +
-                                 "fallback: trust UID if appId≥10000, drop if appId<10000"
+                FILTER_HYBRID -> "uid%100_000==$targetAppId → pid∈ActivityManager.getRunningAppProcesses() (refresh every ${PID_REFRESH_MS/1000}s)"
                 else          -> filterMode
             }
 
@@ -239,8 +214,8 @@ class LogCaptureService : Service() {
                                 val userId = uid / 100_000
                                 val pid    = extractPid(line) ?: return@forEachLine
 
-                                // Step 2: on-demand PID verification via /proc
-                                if (!verifyPid(pid, targetAppId)) return@forEachLine
+                                // Step 2: PID verify against ActivityManager snapshot
+                                if (pid !in amPidSet) return@forEachLine
 
                                 filtered.println("${if (userId == 0) "[owner]" else "[user$userId]"} $line")
                                 filteredCount++
