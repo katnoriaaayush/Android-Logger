@@ -25,7 +25,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvLiveStatus: TextView
     private lateinit var tvLog: TextView
     private lateinit var scrollLog: ScrollView
-    private lateinit var btnStart: Button
+    private lateinit var btnStartPid: Button
+    private lateinit var btnStartUid: Button
     private lateinit var btnStop: Button
     private lateinit var btnRefresh: Button
     private lateinit var btnKpiStart: Button
@@ -49,15 +50,24 @@ class MainActivity : AppCompatActivity() {
         tvLiveStatus  = findViewById(R.id.tv_live_status)
         tvLog         = findViewById(R.id.tv_log)
         scrollLog     = findViewById(R.id.scroll_log)
-        btnStart      = findViewById(R.id.btn_start)
+        btnStartPid   = findViewById(R.id.btn_start_pid)
+        btnStartUid   = findViewById(R.id.btn_start_uid)
         btnStop       = findViewById(R.id.btn_stop)
         btnRefresh    = findViewById(R.id.btn_refresh)
         btnKpiStart   = findViewById(R.id.btn_kpi_start)
         btnKpiStop    = findViewById(R.id.btn_kpi_stop)
         btnFetchUsage = findViewById(R.id.btn_fetch_usage)
 
-        btnStart.setOnClickListener {
-            startForegroundService(Intent(this, LogCaptureService::class.java))
+        btnStartPid.setOnClickListener {
+            startForegroundService(Intent(this, LogCaptureService::class.java).apply {
+                putExtra(LogCaptureService.EXTRA_FILTER_MODE, LogCaptureService.FILTER_PID)
+            })
+            refreshInfoPanel()
+        }
+        btnStartUid.setOnClickListener {
+            startForegroundService(Intent(this, LogCaptureService::class.java).apply {
+                putExtra(LogCaptureService.EXTRA_FILTER_MODE, LogCaptureService.FILTER_UID)
+            })
             refreshInfoPanel()
         }
         btnStop.setOnClickListener {
@@ -147,21 +157,37 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        val newText = buildString {
-            if (latestKpi != null) {
-                val dataLines = latestKpi.readLines().filter { !it.startsWith("#") && it.isNotBlank() }
-                appendLine("KPI EVENTS  ·  ${latestKpi.name}  ·  ${dataLines.size} events")
-                appendLine("─".repeat(70))
-                dataLines.takeLast(80).forEach { appendLine(it) }
-            }
+        val latestPid = allFiles.firstOrNull { it.name.contains("_pid_filtered.txt") }
+        val latestUid = allFiles.firstOrNull { it.name.contains("_uid_filtered.txt") }
 
-            if (latestUsage != null) {
-                if (latestKpi != null) appendLine()
-                val dataLines = latestUsage.readLines().filter { !it.startsWith("#") && it.isNotBlank() }
-                appendLine("APP USAGE  ·  ${latestUsage.name}  ·  ${dataLines.size} apps")
+        val newText = buildString {
+            if (latestPid != null) {
+                val data = latestPid.readLines().filter { !it.startsWith("#") && it.isNotBlank() }
+                appendLine("● PID FILTER  ·  ${latestPid.name}  ·  ${data.size} lines")
                 appendLine("─".repeat(70))
-                dataLines.take(30).forEach { appendLine(it) }
-                if (dataLines.size > 30) appendLine("  … ${dataLines.size - 30} more apps in file")
+                data.takeLast(40).forEach { appendLine(it) }
+            }
+            if (latestUid != null) {
+                if (latestPid != null) appendLine()
+                val data = latestUid.readLines().filter { !it.startsWith("#") && it.isNotBlank() }
+                appendLine("● UID FILTER  ·  ${latestUid.name}  ·  ${data.size} lines")
+                appendLine("─".repeat(70))
+                data.takeLast(40).forEach { appendLine(it) }
+            }
+            if (latestKpi != null) {
+                if (latestPid != null || latestUid != null) appendLine()
+                val dataLines = latestKpi.readLines().filter { !it.startsWith("#") && it.isNotBlank() }
+                appendLine("● KPI EVENTS  ·  ${latestKpi.name}  ·  ${dataLines.size} events")
+                appendLine("─".repeat(70))
+                dataLines.takeLast(30).forEach { appendLine(it) }
+            }
+            if (latestUsage != null) {
+                if (latestPid != null || latestUid != null || latestKpi != null) appendLine()
+                val dataLines = latestUsage.readLines().filter { !it.startsWith("#") && it.isNotBlank() }
+                appendLine("● APP USAGE  ·  ${latestUsage.name}  ·  ${dataLines.size} apps")
+                appendLine("─".repeat(70))
+                dataLines.take(20).forEach { appendLine(it) }
+                if (dataLines.size > 20) appendLine("  … ${dataLines.size - 20} more apps in file")
             }
         }
 
@@ -244,14 +270,15 @@ class MainActivity : AppCompatActivity() {
         val outDir = File(Environment.getExternalStorageDirectory(), "CrossUserLogTest")
         val allFiles = outDir.listFiles()?.sortedByDescending { it.lastModified() } ?: emptyList()
         tvInfo.text = buildString {
-            appendLine("Process UID  : $myUid  →  " +
+            appendLine("Process UID : $myUid  →  " +
                     if (myUid == 1000) "OK ✓ system" else "NOT 1000 — platform signing required")
-            appendLine("Target pkg   : ${LogCaptureService.TARGET_PKG}")
-            appendLine("Output dir   : ${outDir.absolutePath}")
-            appendLine("Filtered : ${allFiles.count { it.name.contains("_filtered.txt") }}  " +
-                       "Complete : ${allFiles.count { it.name.contains("_complete.txt") }}")
-            append(    "KPI files: ${allFiles.count { it.name.startsWith("kpi_events_") }}  " +
-                       "Usage files: ${allFiles.count { it.name.startsWith("usage_stats_") }}")
+            appendLine("Target pkg  : ${LogCaptureService.TARGET_PKG}")
+            appendLine("Output dir  : ${outDir.absolutePath}")
+            appendLine("PID-filtered: ${allFiles.count { it.name.contains("_pid_filtered.txt") }}  " +
+                       "UID-filtered: ${allFiles.count { it.name.contains("_uid_filtered.txt") }}  " +
+                       "Complete: ${allFiles.count { it.name.contains("_complete.txt") }}")
+            append(    "KPI events  : ${allFiles.count { it.name.startsWith("kpi_events_") }}  " +
+                       "Usage stats: ${allFiles.count { it.name.startsWith("usage_stats_") }}")
         }
     }
 }

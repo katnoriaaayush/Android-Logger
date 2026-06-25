@@ -24,26 +24,36 @@
         android:layout_marginTop="12dp">
 
         <Button
-            android:id="@+id/btn_start"
+            android:id="@+id/btn_start_pid"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:text="Start Service" />
+            android:text="Start (PID filter)"
+            android:backgroundTint="#2e7d32" />
+
+        <Button
+            android:id="@+id/btn_start_uid"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginStart="6dp"
+            android:text="Start (UID filter)"
+            android:backgroundTint="#e65100" />
 
         <Button
             android:id="@+id/btn_stop"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:layout_marginStart="8dp"
-            android:text="Stop Service" />
+            android:layout_marginStart="6dp"
+            android:text="Stop" />
 
         <Button
             android:id="@+id/btn_refresh"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:layout_marginStart="8dp"
+            android:layout_marginStart="6dp"
             android:text="Refresh" />
     </LinearLayout>
 
