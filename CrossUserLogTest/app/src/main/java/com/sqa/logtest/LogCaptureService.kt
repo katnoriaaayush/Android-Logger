@@ -23,11 +23,12 @@ class LogCaptureService : Service() {
         const val TARGET_PKG       = "com.abc.xyz"
         const val CHANNEL_ID       = "log_capture"
         const val NOTIF_ID         = 1
-        const val ACTION_STOP      = "com.sqa.logtest.STOP"
+        const val ACTION_STOP       = "com.sqa.logtest.STOP"
         const val EXTRA_FILTER_MODE = "filter_mode"
-        const val FILTER_PID       = "pid"   // /proc-based PID tracking
-        const val FILTER_UID       = "uid"   // UID resolved via PackageManager
-        const val PID_REFRESH_MS   = 15_000L
+        const val FILTER_PID        = "pid"     // /proc-based PID tracking only
+        const val FILTER_UID        = "uid"     // UID modulo only
+        const val FILTER_HYBRID     = "hybrid"  // UID pre-filter → PID verification
+        const val PID_REFRESH_MS    = 15_000L
     }
 
     private var logcatProcess: java.lang.Process? = null
@@ -54,7 +55,7 @@ class LogCaptureService : Service() {
         if (captureThread == null) {
             filterMode = intent?.getStringExtra(EXTRA_FILTER_MODE) ?: FILTER_PID
             Log.i(TAG, "Starting capture — filterMode=$filterMode")
-            if (filterMode == FILTER_PID) startPidRefresher()
+            if (filterMode == FILTER_PID || filterMode == FILTER_HYBRID) startPidRefresher()
             startCapture()
         }
         return START_STICKY
@@ -154,10 +155,11 @@ class LogCaptureService : Service() {
                 PrintWriter(completeFile.bufferedWriter()).use { complete ->
 
                     val filterDesc = when (filterMode) {
-                        FILTER_PID -> "user-0: pid in pidToUser (/proc scan every ${PID_REFRESH_MS/1000}s)" +
-                                      " | secondary users: uid%100_000==appId (SELinux blocks /proc cross-user)"
-                        FILTER_UID -> "uid % 100_000 == $targetAppId (PackageManager.getPackageUid)"
-                        else       -> filterMode
+                        FILTER_PID    -> "user-0: pid in pidToUser (/proc scan every ${PID_REFRESH_MS/1000}s)" +
+                                         " | secondary users: uid%100_000==appId"
+                        FILTER_UID    -> "uid % 100_000 == $targetAppId (all users, no PID check)"
+                        FILTER_HYBRID -> "step1: uid%100_000==$targetAppId  step2 (user-0): pid in pidToUser"
+                        else          -> filterMode
                     }
                     writeHeader(filtered, "filtered ($filterMode mode)", "# Match rule     : $filterDesc")
                     writeHeader(complete, "complete logcat dump", "# Contents       : every log line")
@@ -194,6 +196,27 @@ class LogCaptureService : Service() {
                             FILTER_UID -> {
                                 if (uid % 100_000 != targetAppId) return@forEachLine
                                 val userId = uid / 100_000
+                                val profile = if (userId == 0) "[owner]" else "[user$userId]"
+                                filtered.println("$profile $line")
+                                filteredCount++
+                                if (filteredCount % 10 == 0) filtered.flush()
+                            }
+                            FILTER_HYBRID -> {
+                                // Step 1: UID pre-filter — fast broad net, cross-user aware
+                                if (uid % 100_000 != targetAppId) return@forEachLine
+                                val userId = uid / 100_000
+
+                                if (userId == 0) {
+                                    // Step 2: PID verification for user-0 eliminates shared-UID
+                                    // system processes. If the map is still empty (first /proc scan
+                                    // hasn't completed yet) we accept on UID alone to avoid
+                                    // dropping early boot logs.
+                                    val pid = extractPid(line) ?: return@forEachLine
+                                    if (pidToUser.isNotEmpty() && pidToUser[pid] == null) return@forEachLine
+                                }
+                                // Secondary users: UID is sufficient — their system services
+                                // (UID 1001000, 1001001 …) never share an appId with user apps.
+
                                 val profile = if (userId == 0) "[owner]" else "[user$userId]"
                                 filtered.println("$profile $line")
                                 filteredCount++

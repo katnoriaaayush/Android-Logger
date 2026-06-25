@@ -27,6 +27,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var scrollLog: ScrollView
     private lateinit var btnStartPid: Button
     private lateinit var btnStartUid: Button
+    private lateinit var btnStartHybrid: Button
     private lateinit var btnStop: Button
     private lateinit var btnRefresh: Button
     private lateinit var btnKpiStart: Button
@@ -50,9 +51,10 @@ class MainActivity : AppCompatActivity() {
         tvLiveStatus  = findViewById(R.id.tv_live_status)
         tvLog         = findViewById(R.id.tv_log)
         scrollLog     = findViewById(R.id.scroll_log)
-        btnStartPid   = findViewById(R.id.btn_start_pid)
-        btnStartUid   = findViewById(R.id.btn_start_uid)
-        btnStop       = findViewById(R.id.btn_stop)
+        btnStartPid    = findViewById(R.id.btn_start_pid)
+        btnStartUid    = findViewById(R.id.btn_start_uid)
+        btnStartHybrid = findViewById(R.id.btn_start_hybrid)
+        btnStop        = findViewById(R.id.btn_stop)
         btnRefresh    = findViewById(R.id.btn_refresh)
         btnKpiStart   = findViewById(R.id.btn_kpi_start)
         btnKpiStop    = findViewById(R.id.btn_kpi_stop)
@@ -67,6 +69,12 @@ class MainActivity : AppCompatActivity() {
         btnStartUid.setOnClickListener {
             startForegroundService(Intent(this, LogCaptureService::class.java).apply {
                 putExtra(LogCaptureService.EXTRA_FILTER_MODE, LogCaptureService.FILTER_UID)
+            })
+            refreshInfoPanel()
+        }
+        btnStartHybrid.setOnClickListener {
+            startForegroundService(Intent(this, LogCaptureService::class.java).apply {
+                putExtra(LogCaptureService.EXTRA_FILTER_MODE, LogCaptureService.FILTER_HYBRID)
             })
             refreshInfoPanel()
         }
@@ -157,18 +165,26 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        val latestPid = allFiles.firstOrNull { it.name.contains("_pid_filtered.txt") }
-        val latestUid = allFiles.firstOrNull { it.name.contains("_uid_filtered.txt") }
+        val latestPid    = allFiles.firstOrNull { it.name.contains("_pid_filtered.txt") }
+        val latestUid    = allFiles.firstOrNull { it.name.contains("_uid_filtered.txt") }
+        val latestHybrid = allFiles.firstOrNull { it.name.contains("_hybrid_filtered.txt") }
 
         val newText = buildString {
+            if (latestHybrid != null) {
+                val data = latestHybrid.readLines().filter { !it.startsWith("#") && it.isNotBlank() }
+                appendLine("● UID+PID HYBRID  ·  ${latestHybrid.name}  ·  ${data.size} lines")
+                appendLine("─".repeat(70))
+                data.takeLast(40).forEach { appendLine(it) }
+            }
             if (latestPid != null) {
+                if (latestHybrid != null) appendLine()
                 val data = latestPid.readLines().filter { !it.startsWith("#") && it.isNotBlank() }
                 appendLine("● PID FILTER  ·  ${latestPid.name}  ·  ${data.size} lines")
                 appendLine("─".repeat(70))
                 data.takeLast(40).forEach { appendLine(it) }
             }
             if (latestUid != null) {
-                if (latestPid != null) appendLine()
+                if (latestHybrid != null || latestPid != null) appendLine()
                 val data = latestUid.readLines().filter { !it.startsWith("#") && it.isNotBlank() }
                 appendLine("● UID FILTER  ·  ${latestUid.name}  ·  ${data.size} lines")
                 appendLine("─".repeat(70))
@@ -274,8 +290,9 @@ class MainActivity : AppCompatActivity() {
                     if (myUid == 1000) "OK ✓ system" else "NOT 1000 — platform signing required")
             appendLine("Target pkg  : ${LogCaptureService.TARGET_PKG}")
             appendLine("Output dir  : ${outDir.absolutePath}")
-            appendLine("PID-filtered: ${allFiles.count { it.name.contains("_pid_filtered.txt") }}  " +
-                       "UID-filtered: ${allFiles.count { it.name.contains("_uid_filtered.txt") }}  " +
+            appendLine("PID: ${allFiles.count { it.name.contains("_pid_filtered.txt") }}  " +
+                       "UID: ${allFiles.count { it.name.contains("_uid_filtered.txt") }}  " +
+                       "Hybrid: ${allFiles.count { it.name.contains("_hybrid_filtered.txt") }}  " +
                        "Complete: ${allFiles.count { it.name.contains("_complete.txt") }}")
             append(    "KPI events  : ${allFiles.count { it.name.startsWith("kpi_events_") }}  " +
                        "Usage stats: ${allFiles.count { it.name.startsWith("usage_stats_") }}")

@@ -16,7 +16,7 @@
         android:background="#1e1e2e"
         android:textColor="#cdd6f4" />
 
-    <!-- Log capture buttons -->
+    <!-- Log capture — start row -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -28,7 +28,7 @@
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:text="Start (PID filter)"
+            android:text="Start PID"
             android:backgroundTint="#2e7d32" />
 
         <Button
@@ -37,16 +37,33 @@
             android:layout_height="wrap_content"
             android:layout_weight="1"
             android:layout_marginStart="6dp"
-            android:text="Start (UID filter)"
+            android:text="Start UID"
             android:backgroundTint="#e65100" />
+
+        <Button
+            android:id="@+id/btn_start_hybrid"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginStart="6dp"
+            android:text="Start UID+PID"
+            android:backgroundTint="#1565c0" />
+    </LinearLayout>
+
+    <!-- Log capture — control row -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:layout_marginTop="6dp">
 
         <Button
             android:id="@+id/btn_stop"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:layout_marginStart="6dp"
-            android:text="Stop" />
+            android:text="Stop Capture"
+            android:backgroundTint="#b71c1c" />
 
         <Button
             android:id="@+id/btn_refresh"
