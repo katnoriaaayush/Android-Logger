@@ -138,7 +138,7 @@ class LogCaptureService : Service() {
             val am = getSystemService(ActivityManager::class.java)
             val listenerClass = Class.forName("android.app.ActivityManager\$OnUidImportanceListener")
             val proxy = Proxy.newProxyInstance(
-                listenerClass.classLoader,
+                classLoader,
                 arrayOf(listenerClass)
             ) { _, method, args ->
                 if (method.name == "onUidImportance" && args != null && args.size == 2) {
