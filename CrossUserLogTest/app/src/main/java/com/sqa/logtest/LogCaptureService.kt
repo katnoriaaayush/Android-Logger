@@ -30,7 +30,8 @@ class LogCaptureService : Service() {
         const val FILTER_PID        = "pid"     // batch /proc scan, 15-s window
         const val FILTER_UID        = "uid"     // UID modulo only, no PID check
         const val FILTER_HYBRID     = "hybrid"  // UID pre-filter + ActivityManager PID verify
-        const val PID_REFRESH_MS    = 15_000L
+        const val PID_REFRESH_MS        = 15_000L   // FILTER_PID /proc batch scan
+        const val AM_SECONDARY_REFRESH_MS = 3_000L    // FILTER_HYBRID secondary-user poll
     }
 
     private var logcatProcess: java.lang.Process? = null
@@ -68,7 +69,9 @@ class LogCaptureService : Service() {
                 FILTER_PID    -> startBgThread("pid-refresher", ::refreshPids)
                 FILTER_HYBRID -> {
                     refreshAmPids()       // sync: amPidSet populated before first logcat line
-                    registerUidListener() // event-driven: refresh on every process start/stop
+                    registerUidListener() // instant updates for user-0 UID events
+                    // OnUidImportanceListener only fires for user-0 UIDs; poll at 3s for secondary users
+                    startBgThread("am-secondary-refresher", AM_SECONDARY_REFRESH_MS, ::refreshAmPids)
                 }
             }
             startCapture()
@@ -87,11 +90,11 @@ class LogCaptureService : Service() {
 
     // ─── background thread helper ────────────────────────────────────────────────
 
-    private fun startBgThread(name: String, task: () -> Unit) {
+    private fun startBgThread(name: String, intervalMs: Long = PID_REFRESH_MS, task: () -> Unit) {
         bgThread = Thread({
             while (!Thread.currentThread().isInterrupted) {
                 task()
-                try { Thread.sleep(PID_REFRESH_MS) } catch (e: InterruptedException) { break }
+                try { Thread.sleep(intervalMs) } catch (e: InterruptedException) { break }
             }
         }, name).also { it.isDaemon = true; it.start() }
     }
@@ -193,8 +196,8 @@ class LogCaptureService : Service() {
             Log.i(TAG, "OnUidImportanceListener registered via reflection")
         } catch (e: Exception) {
             Log.w(TAG, "OnUidImportanceListener unavailable — ${e.javaClass.simpleName}: ${e.message}", e)
-            Log.w(TAG, "Falling back to ${PID_REFRESH_MS/1000}s AM poll")
-            startBgThread("am-pid-refresher", ::refreshAmPids)
+            Log.w(TAG, "Falling back to ${AM_SECONDARY_REFRESH_MS/1000}s AM poll")
+            startBgThread("am-pid-refresher", AM_SECONDARY_REFRESH_MS, ::refreshAmPids)
         }
     }
 
