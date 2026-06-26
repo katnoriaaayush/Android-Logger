@@ -62,7 +62,10 @@ class LogCaptureService : Service() {
             Log.i(TAG, "filterMode=$filterMode")
             when (filterMode) {
                 FILTER_PID    -> startBgThread("pid-refresher",  ::refreshPids)
-                FILTER_HYBRID -> startBgThread("am-pid-refresher", ::refreshAmPids)
+                FILTER_HYBRID -> {
+                    refreshAmPids()                                   // populate amPidSet before first line is read
+                    startBgThread("am-pid-refresher", ::refreshAmPids)
+                }
             }
             startCapture()
         }
