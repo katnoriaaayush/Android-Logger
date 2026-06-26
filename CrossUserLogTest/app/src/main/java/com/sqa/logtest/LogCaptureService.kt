@@ -12,6 +12,7 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import java.io.File
 import java.io.PrintWriter
+import java.lang.reflect.Proxy
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -43,9 +44,9 @@ class LogCaptureService : Service() {
     private val pidToUser = ConcurrentHashMap<Int, Int>()
 
     // FILTER_HYBRID: set of PIDs belonging to TARGET_PKG populated by AM and kept
-    // current via OnUidImportanceListener — event-driven, no polling.
+    // current via OnUidImportanceListener (accessed via reflection — @hide API).
     @Volatile private var amPidSet: Set<Int> = emptySet()
-    private var uidImportanceListener: ActivityManager.OnUidImportanceListener? = null
+    private var uidListenerProxy: Any? = null   // reflection proxy for OnUidImportanceListener
 
     // ─── lifecycle ───────────────────────────────────────────────────────────────
 
@@ -81,7 +82,7 @@ class LogCaptureService : Service() {
         captureThread?.interrupt()
         bgThread?.interrupt()
         unregisterUidListener()
-        Log.i(TAG, "onDestroy")
+        Log.i(TAG, "onDestroy — filterMode=$filterMode")
     }
 
     // ─── background thread helper ────────────────────────────────────────────────
@@ -133,25 +134,45 @@ class LogCaptureService : Service() {
     }
 
     private fun registerUidListener() {
-        val am = getSystemService(ActivityManager::class.java)
-        val listener = object : ActivityManager.OnUidImportanceListener {
-            override fun onUidImportance(uid: Int, importance: Int) {
-                if (uid % 100_000 == targetAppId) {
-                    Log.d(TAG, "UID $uid importance→$importance — refreshing AM PIDs")
-                    Thread { refreshAmPids() }.start()
+        try {
+            val am = getSystemService(ActivityManager::class.java)
+            val listenerClass = Class.forName("android.app.ActivityManager\$OnUidImportanceListener")
+            val proxy = Proxy.newProxyInstance(
+                listenerClass.classLoader,
+                arrayOf(listenerClass)
+            ) { _, method, args ->
+                if (method.name == "onUidImportance" && args != null && args.size == 2) {
+                    val uid = args[0] as Int
+                    val importance = args[1] as Int
+                    if (uid % 100_000 == targetAppId) {
+                        Log.d(TAG, "UID $uid importance→$importance — refreshing AM PIDs")
+                        Thread { refreshAmPids() }.start()
+                    }
                 }
+                null
             }
+            ActivityManager::class.java
+                .getMethod("addOnUidImportanceListener", listenerClass, Int::class.javaPrimitiveType)
+                .invoke(am, proxy, ActivityManager.RunningAppProcessInfo.IMPORTANCE_GONE)
+            uidListenerProxy = proxy
+            Log.i(TAG, "OnUidImportanceListener registered via reflection")
+        } catch (e: Exception) {
+            Log.w(TAG, "OnUidImportanceListener unavailable (${e.javaClass.simpleName}), falling back to ${PID_REFRESH_MS/1000}s poll")
+            startBgThread("am-pid-refresher", ::refreshAmPids)
         }
-        uidImportanceListener = listener
-        am.addOnUidImportanceListener(listener, ActivityManager.RunningAppProcessInfo.IMPORTANCE_GONE)
     }
 
     private fun unregisterUidListener() {
-        uidImportanceListener?.let {
-            try { getSystemService(ActivityManager::class.java).removeOnUidImportanceListener(it) }
-            catch (_: Exception) {}
-            uidImportanceListener = null
+        val proxy = uidListenerProxy ?: return
+        try {
+            val listenerClass = Class.forName("android.app.ActivityManager\$OnUidImportanceListener")
+            ActivityManager::class.java
+                .getMethod("removeOnUidImportanceListener", listenerClass)
+                .invoke(getSystemService(ActivityManager::class.java), proxy)
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to unregister UID listener: ${e.message}")
         }
+        uidListenerProxy = null
     }
 
     // ─── logcat capture ──────────────────────────────────────────────────────────
