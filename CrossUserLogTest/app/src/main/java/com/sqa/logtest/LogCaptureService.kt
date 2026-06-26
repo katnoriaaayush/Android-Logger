@@ -34,16 +34,18 @@ class LogCaptureService : Service() {
 
     private var logcatProcess: java.lang.Process? = null
     private var captureThread: Thread? = null
-    private var bgThread: Thread? = null          // pid-refresher (PID) or cache-cleaner (HYBRID)
-    @Volatile private var filterMode = FILTER_PID
+    private var bgThread: Thread? = null
+    @Volatile private var filterMode   = FILTER_PID
+    @Volatile private var targetAppId  = -1
     @Volatile private var outputFile: File? = null
 
     // FILTER_PID: pid → userId (0 = owner, 10 = user10, …)
     private val pidToUser = ConcurrentHashMap<Int, Int>()
 
-    // FILTER_HYBRID: set of PIDs belonging to TARGET_PKG, refreshed every PID_REFRESH_MS
-    // via ActivityManager.getRunningAppProcesses() — works across all user profiles.
+    // FILTER_HYBRID: set of PIDs belonging to TARGET_PKG populated by AM and kept
+    // current via OnUidImportanceListener — event-driven, no polling.
     @Volatile private var amPidSet: Set<Int> = emptySet()
+    private var uidImportanceListener: ActivityManager.OnUidImportanceListener? = null
 
     // ─── lifecycle ───────────────────────────────────────────────────────────────
 
@@ -58,13 +60,14 @@ class LogCaptureService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) { stopSelf(); return START_NOT_STICKY }
         if (captureThread == null) {
-            filterMode = intent?.getStringExtra(EXTRA_FILTER_MODE) ?: FILTER_PID
-            Log.i(TAG, "filterMode=$filterMode")
+            filterMode  = intent?.getStringExtra(EXTRA_FILTER_MODE) ?: FILTER_PID
+            targetAppId = try { packageManager.getPackageUid(TARGET_PKG, 0) % 100_000 } catch (_: Exception) { -1 }
+            Log.i(TAG, "filterMode=$filterMode targetAppId=$targetAppId")
             when (filterMode) {
-                FILTER_PID    -> startBgThread("pid-refresher",  ::refreshPids)
+                FILTER_PID    -> startBgThread("pid-refresher", ::refreshPids)
                 FILTER_HYBRID -> {
-                    refreshAmPids()                                   // populate amPidSet before first line is read
-                    startBgThread("am-pid-refresher", ::refreshAmPids)
+                    refreshAmPids()       // sync: amPidSet populated before first logcat line
+                    registerUidListener() // event-driven: refresh on every process start/stop
                 }
             }
             startCapture()
@@ -77,6 +80,7 @@ class LogCaptureService : Service() {
         logcatProcess?.destroy()
         captureThread?.interrupt()
         bgThread?.interrupt()
+        unregisterUidListener()
         Log.i(TAG, "onDestroy")
     }
 
@@ -128,6 +132,26 @@ class LogCaptureService : Service() {
         updateNotification(if (newSet.isNotEmpty()) "[Hybrid] ${newSet.size} PID(s) via AM" else "[Hybrid] Waiting for $TARGET_PKG…")
     }
 
+    private fun registerUidListener() {
+        val am = getSystemService(ActivityManager::class.java)
+        val listener = ActivityManager.OnUidImportanceListener { uid, importance ->
+            if (uid % 100_000 == targetAppId) {
+                Log.d(TAG, "UID $uid importance→$importance — refreshing AM PIDs")
+                Thread { refreshAmPids() }.start()
+            }
+        }
+        uidImportanceListener = listener
+        am.addOnUidImportanceListener(listener, ActivityManager.RunningAppProcessInfo.IMPORTANCE_GONE)
+    }
+
+    private fun unregisterUidListener() {
+        uidImportanceListener?.let {
+            try { getSystemService(ActivityManager::class.java).removeOnUidImportanceListener(it) }
+            catch (_: Exception) {}
+            uidImportanceListener = null
+        }
+    }
+
     // ─── logcat capture ──────────────────────────────────────────────────────────
 
     private fun startCapture() {
@@ -149,9 +173,6 @@ class LogCaptureService : Service() {
 
             val myUid   = android.os.Process.myUid()
             val started = Date()
-            val targetAppId: Int = try {
-                packageManager.getPackageUid(TARGET_PKG, 0) % 100_000
-            } catch (_: Exception) { -1 }
 
             fun writeHeader(w: PrintWriter, label: String, rule: String) {
                 w.println("# CrossUserLogTest — $label")
@@ -168,7 +189,7 @@ class LogCaptureService : Service() {
             val ruleDesc = when (filterMode) {
                 FILTER_PID    -> "user-0: pid∈pidToUser (/proc batch scan every ${PID_REFRESH_MS/1000}s) | secondary: uid%100_000==appId"
                 FILTER_UID    -> "uid%100_000==$targetAppId (all users, no PID check)"
-                FILTER_HYBRID -> "uid%100_000==$targetAppId → pid∈ActivityManager.getRunningAppProcesses() (refresh every ${PID_REFRESH_MS/1000}s)"
+                FILTER_HYBRID -> "uid%100_000==$targetAppId → pid∈amPidSet (event-driven via OnUidImportanceListener)"
                 else          -> filterMode
             }
 
