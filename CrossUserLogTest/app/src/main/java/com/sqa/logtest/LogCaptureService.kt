@@ -134,10 +134,12 @@ class LogCaptureService : Service() {
 
     private fun registerUidListener() {
         val am = getSystemService(ActivityManager::class.java)
-        val listener = ActivityManager.OnUidImportanceListener { uid, importance ->
-            if (uid % 100_000 == targetAppId) {
-                Log.d(TAG, "UID $uid importance→$importance — refreshing AM PIDs")
-                Thread { refreshAmPids() }.start()
+        val listener = object : ActivityManager.OnUidImportanceListener {
+            override fun onUidImportance(uid: Int, importance: Int) {
+                if (uid % 100_000 == targetAppId) {
+                    Log.d(TAG, "UID $uid importance→$importance — refreshing AM PIDs")
+                    Thread { refreshAmPids() }.start()
+                }
             }
         }
         uidImportanceListener = listener
