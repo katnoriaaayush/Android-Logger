@@ -122,15 +122,36 @@ class LogCaptureService : Service() {
     // ─── FILTER_HYBRID: ActivityManager PID refresh ──────────────────────────────
 
     private fun refreshAmPids() {
-        val am = getSystemService(ActivityManager::class.java)
-        val newSet = am.runningAppProcesses
+        val newSet = mutableSetOf<Int>()
+
+        // ActivityManager — fast, but only returns user-0 processes
+        getSystemService(ActivityManager::class.java).runningAppProcesses
             ?.filter { it.processName == TARGET_PKG || it.processName.startsWith("$TARGET_PKG:") }
-            ?.map { it.pid }
-            ?.toHashSet()
-            ?: hashSetOf()
+            ?.forEach { newSet.add(it.pid) }
+
+        // ps -A — covers secondary-user processes that AM omits
+        // Runs as a subprocess (toybox domain), which can read /proc across all users.
+        // Format: USER  PID  PPID  VSZ  RSS  WCHAN  ADDR  S  NAME
+        try {
+            val proc = Runtime.getRuntime().exec(arrayOf("ps", "-A"))
+            proc.inputStream.bufferedReader().useLines { lines ->
+                lines.drop(1).forEach { line ->       // skip header row
+                    val cols = line.trim().split("\\s+".toRegex())
+                    if (cols.size < 2) return@forEach
+                    val name = cols.last()
+                    if (name == TARGET_PKG || name.startsWith("$TARGET_PKG:")) {
+                        cols[1].toIntOrNull()?.let { newSet.add(it) }
+                    }
+                }
+            }
+            proc.waitFor()
+        } catch (e: Exception) {
+            Log.w(TAG, "ps -A scan failed: ${e.message}")
+        }
+
         amPidSet = newSet
-        Log.d(TAG, "AM PIDs for $TARGET_PKG: $newSet")
-        updateNotification(if (newSet.isNotEmpty()) "[Hybrid] ${newSet.size} PID(s) via AM" else "[Hybrid] Waiting for $TARGET_PKG…")
+        Log.d(TAG, "Hybrid PIDs for $TARGET_PKG (all users): $newSet")
+        updateNotification(if (newSet.isNotEmpty()) "[Hybrid] ${newSet.size} PID(s)" else "[Hybrid] Waiting for $TARGET_PKG…")
     }
 
     private fun registerUidListener() {
