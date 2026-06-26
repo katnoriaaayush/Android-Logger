@@ -137,6 +137,8 @@ class LogCaptureService : Service() {
         try {
             val am = getSystemService(ActivityManager::class.java)
             val listenerClass = Class.forName("android.app.ActivityManager\$OnUidImportanceListener")
+            Log.d(TAG, "OnUidImportanceListener class resolved: $listenerClass")
+
             val proxy = Proxy.newProxyInstance(
                 classLoader,
                 arrayOf(listenerClass)
@@ -151,13 +153,16 @@ class LogCaptureService : Service() {
                 }
                 null
             }
+
+            // Integer.TYPE == int.class (primitive); never null unlike Int::class.javaPrimitiveType
             ActivityManager::class.java
-                .getMethod("addOnUidImportanceListener", listenerClass, Int::class.javaPrimitiveType)
+                .getMethod("addOnUidImportanceListener", listenerClass, Integer.TYPE)
                 .invoke(am, proxy, ActivityManager.RunningAppProcessInfo.IMPORTANCE_GONE)
             uidListenerProxy = proxy
             Log.i(TAG, "OnUidImportanceListener registered via reflection")
         } catch (e: Exception) {
-            Log.w(TAG, "OnUidImportanceListener unavailable (${e.javaClass.simpleName}), falling back to ${PID_REFRESH_MS/1000}s poll")
+            Log.w(TAG, "OnUidImportanceListener unavailable — ${e.javaClass.simpleName}: ${e.message}", e)
+            Log.w(TAG, "Falling back to ${PID_REFRESH_MS/1000}s AM poll")
             startBgThread("am-pid-refresher", ::refreshAmPids)
         }
     }
