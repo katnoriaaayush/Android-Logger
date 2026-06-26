@@ -142,16 +142,26 @@ class LogCaptureService : Service() {
             val proxy = Proxy.newProxyInstance(
                 classLoader,
                 arrayOf(listenerClass)
-            ) { _, method, args ->
-                if (method.name == "onUidImportance" && args != null && args.size == 2) {
-                    val uid = args[0] as Int
-                    val importance = args[1] as Int
-                    if (uid % 100_000 == targetAppId) {
-                        Log.d(TAG, "UID $uid importance→$importance — refreshing AM PIDs")
-                        Thread { refreshAmPids() }.start()
+            ) { proxyObj, method, args ->
+                // Object methods are also dispatched through InvocationHandler.
+                // hashCode() returns int — returning null causes an unboxing NPE.
+                when (method.name) {
+                    "hashCode" -> System.identityHashCode(proxyObj)
+                    "equals"   -> proxyObj === args?.getOrNull(0)
+                    "toString" -> "UidImportanceListenerProxy@${Integer.toHexString(System.identityHashCode(proxyObj))}"
+                    "onUidImportance" -> {
+                        if (args != null && args.size == 2) {
+                            val uid = args[0] as Int
+                            val importance = args[1] as Int
+                            if (uid % 100_000 == targetAppId) {
+                                Log.d(TAG, "UID $uid importance→$importance — refreshing AM PIDs")
+                                Thread { refreshAmPids() }.start()
+                            }
+                        }
+                        null  // void return
                     }
+                    else -> null
                 }
-                null
             }
 
             // Integer.TYPE == int.class (primitive); never null unlike Int::class.javaPrimitiveType
