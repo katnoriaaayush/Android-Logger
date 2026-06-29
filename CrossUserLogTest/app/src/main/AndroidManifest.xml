@@ -73,6 +73,25 @@
             android:foregroundServiceType="dataSync" />
 
         <!--
+            LogBridgeService — Phase-1 Android-side peer of the native logbridged.
+
+            singleUser="true"      — always runs in user 0, even when started
+                                     on behalf of a secondary profile.
+            persistent="true"      — kept alive / restarted by the system (system apps).
+            directBootAware="true" — can start before the user unlocks the device.
+            Started by the daemon via `am start-foreground-service` when a USB
+            volume carrying log.sinfo is detected; connects back to the
+            /dev/socket/logbridge Unix socket for two-way communication.
+        -->
+        <service
+            android:name=".LogBridgeService"
+            android:singleUser="true"
+            android:persistent="true"
+            android:directBootAware="true"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <!--
             BootReceiver — starts LogCaptureService on boot.
 
             directBootAware="true" allows it to fire on LOCKED_BOOT_COMPLETED

@@ -1,0 +1,10 @@
+# Sample log.sinfo — place at the USB root (or /data/local/tmp/log.sinfo for
+# emulator testing). Phase 1 only transmits this file verbatim to the service
+# as the SESSION_CONFIG payload; parsing happens in later phases.
+
+[packages]
+com.company.mainapp
+com.company.launcher
+
+[options]
+min_level=D

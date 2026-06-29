@@ -1,0 +1,27 @@
+# logbridged.rc — place at /system/etc/init/logbridged.rc
+#
+# Phase-1 LogBridge daemon. Started after boot is complete so that the
+# framework (ActivityManager / `am`) is up and /mnt/media_rw is mounted.
+#
+# The `socket` line makes init create /dev/socket/logbridge owned system:system
+# with mode 0660 and pass its fd to the daemon via $ANDROID_SOCKET_logbridge.
+# The LogBridgeService (UID 1000 = system) connects to it via the RESERVED
+# LocalSocket namespace.
+#
+# NOTE: seclabel u:r:shell:s0 is a Phase-1 testing shortcut. A production build
+# must give the daemon its OWN SELinux domain (logbridge_daemon) with scoped
+# allow rules for the socket + /mnt/media_rw, and ship enforcing with zero AVC
+# denials (see README "SELinux / cert notes").
+
+service logbridged /system/bin/logbridged
+    class late_start
+    user root
+    group root system media_rw
+    seclabel u:r:shell:s0
+    socket logbridge stream 0660 system system
+    disabled
+    restart_period 5
+
+# Start only after boot is complete and storage is ready
+on property:sys.boot_completed=1
+    start logbridged

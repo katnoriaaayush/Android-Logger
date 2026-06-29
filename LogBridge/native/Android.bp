@@ -1,0 +1,20 @@
+// Soong build for the Phase-1 LogBridge daemon.
+// Drop this directory into an AOSP tree (or reference it from a device
+// makefile) and add "logbridged" to PRODUCT_PACKAGES.
+//
+// The daemon is intentionally dependency-free (libc only) so it builds and
+// runs in a minimal environment; the init .rc is installed alongside it.
+
+cc_binary {
+    name: "logbridged",
+    srcs: ["logbridged.c"],
+    cflags: [
+        "-Wall",
+        "-Wextra",
+        "-Wno-unused-parameter",
+    ],
+    shared_libs: ["libc"],
+    init_rc: ["logbridged.rc"],
+    // For a real device build, replace the shell seclabel in the .rc with a
+    // dedicated domain and add the sepolicy under BOARD_SEPOLICY_DIRS.
+}
