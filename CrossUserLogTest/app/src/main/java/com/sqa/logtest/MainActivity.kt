@@ -121,9 +121,10 @@ class MainActivity : AppCompatActivity() {
     private fun ensureLoggerAndScanUsb() {
         try {
             startForegroundService(Intent(this, LoggerService::class.java))
-            if (UsbWriteSurface.isRemovableMounted(this)) {
-                startForegroundService(Intent(this, UsbSyncService::class.java))
-            }
+            // UsbWatchService registers a StorageVolumeCallback in THIS (foreground)
+            // user — the reliable mount/unmount signal — and does an immediate scan.
+            startForegroundService(Intent(this, UsbWatchService::class.java))
+            android.util.Log.i("MainActivity", "USB-sync bring-up: started LoggerService + UsbWatchService")
         } catch (e: Exception) {
             android.util.Log.w("MainActivity", "USB-sync bring-up failed: ${e.message}")
         }

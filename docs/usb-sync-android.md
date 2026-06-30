@@ -102,8 +102,18 @@ it — idempotent across fresh inserts, user switches, and retries.
 All components log under their class tags. Watch the whole pathway with:
 
 ```bash
-adb logcat -s LoggerService LogProvider CrossUser UsbWriteSurface UsbSyncService UsbMountReceiver BootReceiver
+adb logcat -s LoggerService LogProvider CrossUser UsbWriteSurface UsbSyncService UsbWatchService UsbMountReceiver BootReceiver
 ```
+
+**To test mount/unmount you must OPEN THE APP in the foreground user first.** The
+USB is only mounted in the foreground user, and the reliable mount signal is a
+`StorageManager.StorageVolumeCallback` registered by `UsbWatchService`, which is
+started from `MainActivity.onResume`. The legacy `MEDIA_MOUNTED` file:// broadcast
+(`UsbMountReceiver`) does **not** fire for app manifest receivers on modern
+Android — it's a best-effort secondary path only. Sequence:
+
+1. Open the app (registers the watcher + runs an immediate scan → `UsbSyncService`).
+2. Insert / remove the stick → `UsbWatchService: onStateChanged … state=mounted`.
 
 What to look for:
 
@@ -113,6 +123,7 @@ What to look for:
 | `LogProvider` | `query(callingUid=…) → N segment(s)`; `openFile(name) → PFD (size=…)` |
 | `CrossUser` | `addUserId(uri,0) → content://0@…` |
 | `UsbWriteSurface` | per-volume `uuid/removable/state/dir`; `writable removable volume at …` |
+| `UsbWatchService` | `onStartCommand (foreground user=…)`; `StorageVolumeCallback registered`; `onStateChanged … state=mounted`; `scanNow → starting UsbSyncService` |
 | `UsbSyncService` | `list URI=…`; `rotate call → rotated=…`; `manifest: N already-synced`; `synced <name> (<bytes>) → …` |
 
 Common signals:

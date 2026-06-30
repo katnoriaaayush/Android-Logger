@@ -123,6 +123,16 @@
             android:foregroundServiceType="dataSync" />
 
         <!--
+            UsbWatchService — runs in the foreground user; registers a
+            StorageManager.StorageVolumeCallback (reliable mount/unmount signal
+            on modern Android) and kicks UsbSyncService on removable mount.
+        -->
+        <service
+            android:name=".UsbWatchService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <!--
             UsbMountReceiver — fires in the foreground user on media mount and
             kicks off UsbSyncService.
         -->
