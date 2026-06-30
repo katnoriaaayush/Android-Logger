@@ -97,6 +97,31 @@ it — idempotent across fresh inserts, user switches, and retries.
 - Gate activation behind enterprise provisioning so cross-user-read + USB-export
   reads as a disclosed managed capability in privacy review.
 
+## Debugging
+
+All components log under their class tags. Watch the whole pathway with:
+
+```bash
+adb logcat -s LoggerService LogProvider CrossUser UsbWriteSurface UsbSyncService UsbMountReceiver BootReceiver
+```
+
+What to look for:
+
+| Tag | Key lines |
+|-----|-----------|
+| `LoggerService` | `start … targetAppId=…`; `refreshPids: AM=… ps=… → N unique`; `captured matched=…`; `rotated → log-<ms>.log` |
+| `LogProvider` | `query(callingUid=…) → N segment(s)`; `openFile(name) → PFD (size=…)` |
+| `CrossUser` | `addUserId(uri,0) → content://0@…` |
+| `UsbWriteSurface` | per-volume `uuid/removable/state/dir`; `writable removable volume at …` |
+| `UsbSyncService` | `list URI=…`; `rotate call → rotated=…`; `manifest: N already-synced`; `synced <name> (<bytes>) → …` |
+
+Common signals:
+- `targetAppId unresolved` → target package not installed.
+- `drop: uid matched but pid ∉ amPidSet` → a target process is missing from the PID
+  set (usual cross-user case) — check `refreshPids` AM/ps counts.
+- `resolve: no writable removable volume found` → USB not mounted in this user, or
+  the board blocks direct `/storage/<uuid>` writes (see Open decision #1).
+
 ## Open decisions
 
 1. **USB write surface** — implemented as runtime-detect **direct path**. SAF

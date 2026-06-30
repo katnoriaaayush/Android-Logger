@@ -1,6 +1,7 @@
 package com.sqa.logtest
 
 import android.net.Uri
+import android.util.Log
 
 /**
  * Cross-user URI helper. A singleUser provider call from a background→foreground
@@ -14,15 +15,20 @@ import android.net.Uri
  */
 object CrossUser {
 
+    private const val TAG = "CrossUser"
+
     fun addUserId(uri: Uri, userId: Int): Uri {
-        return try {
+        val result = try {
             val m = Class.forName("android.content.ContentProvider")
                 .getMethod("maybeAddUserId", Uri::class.java, Int::class.javaPrimitiveType)
             m.invoke(null, uri, userId) as Uri
-        } catch (_: Exception) {
+        } catch (e: Exception) {
             // content://<userId>@authority/path
             val authority = uri.authority ?: return uri
+            Log.d(TAG, "maybeAddUserId reflection unavailable (${e.javaClass.simpleName}) — manual prefix")
             uri.buildUpon().encodedAuthority("$userId@$authority").build()
         }
+        Log.d(TAG, "addUserId($uri, $userId) → $result")
+        return result
     }
 }

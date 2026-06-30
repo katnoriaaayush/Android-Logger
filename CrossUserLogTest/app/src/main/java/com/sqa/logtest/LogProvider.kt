@@ -47,6 +47,7 @@ class LogProvider : ContentProvider() {
             ?.sortedBy { it.lastModified() } ?: emptyList()
         val cursor = MatrixCursor(arrayOf(COL_NAME, COL_SIZE, COL_MTIME))
         for (f in files) cursor.addRow(arrayOf(f.name, f.length(), f.lastModified()))
+        Log.i(TAG, "query(callingUid=${android.os.Binder.getCallingUid()}) dir=${dir.absolutePath} → ${files.size} completed segment(s): ${files.map { it.name }}")
         return cursor
     }
 
@@ -57,7 +58,11 @@ class LogProvider : ContentProvider() {
             .substringAfterLast('/')
         require(isCompleted(name)) { "refused (not a completed segment): $name" }  // never current.log
         val f = File(LoggerService.logsDir(context!!), name)
-        if (!f.exists()) throw FileNotFoundException(name)
+        if (!f.exists()) {
+            Log.w(TAG, "openFile($name): NOT FOUND in ${f.parent}")
+            throw FileNotFoundException(name)
+        }
+        Log.i(TAG, "openFile($name) → PFD (size=${f.length()}, callingUid=${android.os.Binder.getCallingUid()})")
         return ParcelFileDescriptor.open(f, ParcelFileDescriptor.MODE_READ_ONLY)
     }
 

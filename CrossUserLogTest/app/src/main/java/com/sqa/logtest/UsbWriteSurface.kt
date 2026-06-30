@@ -36,21 +36,27 @@ class UsbWriteSurface private constructor(private val dir: File) {
          *  No write probe — use this to decide whether to kick UsbSyncService. */
         fun isRemovableMounted(ctx: Context): Boolean {
             val sm = ctx.getSystemService(StorageManager::class.java)
-            return sm.storageVolumes.any { it.isRemovable && it.state == Environment.MEDIA_MOUNTED }
+            val mounted = sm.storageVolumes.any { it.isRemovable && it.state == Environment.MEDIA_MOUNTED }
+            Log.d(TAG, "isRemovableMounted=$mounted (volumes=${sm.storageVolumes.map { "${it.uuid}:removable=${it.isRemovable}:${it.state}" }})")
+            return mounted
         }
 
         fun resolve(ctx: Context): UsbWriteSurface? {
             val sm = ctx.getSystemService(StorageManager::class.java)
+            Log.i(TAG, "resolve: scanning ${sm.storageVolumes.size} volume(s)")
             for (v in sm.storageVolumes) {
+                val dir = volumeDir(v)
+                Log.d(TAG, "  volume uuid=${v.uuid} removable=${v.isRemovable} state=${v.state} dir=${dir?.absolutePath}")
                 if (!v.isRemovable) continue
                 if (v.state != Environment.MEDIA_MOUNTED) continue
-                val d = volumeDir(v) ?: continue
+                val d = dir ?: continue
                 if (d.canWrite() || probeWritable(d)) {
-                    Log.i(TAG, "removable volume writable at ${d.absolutePath}")
+                    Log.i(TAG, "resolve: writable removable volume at ${d.absolutePath}")
                     return UsbWriteSurface(d)
                 }
-                Log.w(TAG, "removable volume ${d.absolutePath} not writable")
+                Log.w(TAG, "resolve: removable volume ${d.absolutePath} NOT writable")
             }
+            Log.w(TAG, "resolve: no writable removable volume found")
             return null
         }
 

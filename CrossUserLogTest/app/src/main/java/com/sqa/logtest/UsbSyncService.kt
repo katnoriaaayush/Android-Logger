@@ -62,15 +62,19 @@ class UsbSyncService : Service() {
 
             val listUri = CrossUser.addUserId(Uri.parse("content://${LogProvider.AUTHORITY}/logs"), 0)
 
+            Log.i(TAG, "list URI = $listUri")
+
             // 2. force-rotate the user-0 logger so the newest data is a completed segment
             try {
-                contentResolver.call(listUri, "rotate", null, null)
+                val r = contentResolver.call(listUri, "rotate", null, null)
+                Log.i(TAG, "rotate call → rotated=${r?.getBoolean("rotated")}")
             } catch (e: Exception) {
                 Log.w(TAG, "rotate call failed: ${e.message}")
             }
 
             // 3. manifest → already-synced set
             val synced = readManifest(surface)
+            Log.i(TAG, "manifest: ${synced.size} already-synced: $synced")
 
             // 4. query completed segments
             val toSync = ArrayList<Pair<String, Long>>()
@@ -92,17 +96,18 @@ class UsbSyncService : Service() {
                 val fileUri = CrossUser.addUserId(
                     Uri.parse("content://${LogProvider.AUTHORITY}/logs/$name"), 0)
                 try {
+                    var copied = 0L
                     contentResolver.openFileDescriptor(fileUri, "r")!!.use { pfd ->
                         FileInputStream(pfd.fileDescriptor).use { input ->
-                            surface.openOutput(name).use { out -> input.copyTo(out) }
+                            surface.openOutput(name).use { out -> copied = input.copyTo(out) }
                         }
                     }
                     synced.add(name)
                     ok++
                     updateNotification("synced $ok/${toSync.size}")
-                    Log.i(TAG, "synced $name")
+                    Log.i(TAG, "synced $name ($copied bytes) → ${surface.label}/$name")
                 } catch (e: Exception) {
-                    Log.w(TAG, "failed $name: ${e.message}")
+                    Log.w(TAG, "failed $name: ${e.javaClass.simpleName}: ${e.message}")
                 }
             }
 

@@ -65,6 +65,10 @@ class LoggerService : Service() {
     private var currentBytes = 0L
     private var lastRotateMs = 0L
 
+    @Volatile private var totalLines = 0L     // every logcat line seen
+    @Volatile private var matchedLines = 0L   // lines that passed UID+PID filter
+    @Volatile private var segmentCount = 0L   // completed segments produced
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
@@ -86,7 +90,8 @@ class LoggerService : Service() {
             running = true
             instance = this
             targetAppId = try { packageManager.getPackageUid(TARGET_PKG, 0) % 100_000 } catch (_: Exception) { -1 }
-            Log.i(TAG, "start uid=${android.os.Process.myUid()} targetAppId=$targetAppId")
+            Log.i(TAG, "start uid=${android.os.Process.myUid()} user=$userId targetPkg=$TARGET_PKG targetAppId=$targetAppId logsDir=${logsDir(this).absolutePath}")
+            if (targetAppId < 0) Log.w(TAG, "targetAppId unresolved — is $TARGET_PKG installed? capture will match nothing")
             openCurrent()
             pidThread     = Thread(::pidLoop, "logger-pid").also { it.isDaemon = true; it.start() }
             captureThread = Thread(::captureLoop, "logger-capture").also { it.isDaemon = true; it.start() }
@@ -117,10 +122,12 @@ class LoggerService : Service() {
     private fun refreshPids() {
         val set = mutableSetOf<Int>()
         // ActivityManager — user 0 (and cross-user for UID 1000 callers)
-        getSystemService(ActivityManager::class.java).runningAppProcesses
+        val amPids = getSystemService(ActivityManager::class.java).runningAppProcesses
             ?.filter { it.processName == TARGET_PKG || it.processName.startsWith("$TARGET_PKG:") }
-            ?.forEach { set.add(it.pid) }
+            ?.map { it.pid } ?: emptyList()
+        set.addAll(amPids)
         // ps -A — secondary-user processes AM omits (toybox domain reads cross-user /proc)
+        val psPids = mutableListOf<Int>()
         try {
             val p = Runtime.getRuntime().exec(arrayOf("ps", "-A"))
             p.inputStream.bufferedReader().useLines { lines ->
@@ -129,13 +136,17 @@ class LoggerService : Service() {
                     if (cols.size >= 2) {
                         val name = cols.last()
                         if (name == TARGET_PKG || name.startsWith("$TARGET_PKG:"))
-                            cols[1].toIntOrNull()?.let { set.add(it) }
+                            cols[1].toIntOrNull()?.let { psPids.add(it) }
                     }
                 }
             }
             p.waitFor()
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            Log.w(TAG, "refreshPids: ps -A failed: ${e.message}")
+        }
+        set.addAll(psPids)
         amPidSet = set
+        Log.d(TAG, "refreshPids: targetAppId=$targetAppId  AM=${amPids.size}$amPids  ps=${psPids.size}$psPids  → ${set.size} unique $set")
         updateNotification("PIDs:${set.size} · ${currentFile?.name ?: "-"}")
     }
 
@@ -146,17 +157,29 @@ class LoggerService : Service() {
 
     private fun captureLoop() {
         try {
+            Log.i(TAG, "captureLoop: exec logcat -v uid,threadtime -b all")
             val proc = Runtime.getRuntime().exec(arrayOf("logcat", "-v", "uid,threadtime", "-b", "all"))
             logcatProc = proc
             proc.inputStream.bufferedReader().forEachLine { line ->
                 if (!running) return@forEachLine
+                totalLines++
                 val uid = uidRe.find(line)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: return@forEachLine
                 if (uid % 100_000 != targetAppId) return@forEachLine          // step 1: UID
                 val pid = pidRe.find(line)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: return@forEachLine
-                if (pid !in amPidSet) return@forEachLine                       // step 2: PID
+                if (pid !in amPidSet) {                                        // step 2: PID
+                    // UID matched but PID not verified — log occasionally so we can see
+                    // whether amPidSet is missing a process (the usual cross-user gotcha).
+                    if (totalLines % 5000 == 0L)
+                        Log.d(TAG, "drop: uid matched (appId=$targetAppId) but pid=$pid ∉ amPidSet=$amPidSet")
+                    return@forEachLine
+                }
                 val userId = uid / 100_000
                 writeLine("${if (userId == 0) "[owner]" else "[user$userId]"} $line")
+                matchedLines++
+                if (matchedLines % 100 == 0L)
+                    Log.d(TAG, "captured matched=$matchedLines total=$totalLines current=${currentFile?.name} bytes=$currentBytes segments=$segmentCount")
             }
+            Log.i(TAG, "captureLoop ended (running=$running) matched=$matchedLines total=$totalLines")
         } catch (e: Exception) {
             Log.e(TAG, "capture error: ${e.message}", e)
         }
@@ -173,6 +196,7 @@ class LoggerService : Service() {
         current = PrintWriter(BufferedWriter(FileWriter(currentFile!!, true)))
         currentBytes = currentFile!!.length()
         lastRotateMs = System.currentTimeMillis()
+        Log.d(TAG, "openCurrent: ${currentFile!!.absolutePath} (startBytes=$currentBytes)")
     }
 
     private fun writeLine(s: String) {
@@ -195,15 +219,24 @@ class LoggerService : Service() {
         val cf = currentFile
         if (cf != null && cf.length() > 0) {
             val done = File(cf.parentFile, "log-${System.currentTimeMillis()}.log")
-            if (cf.renameTo(done)) Log.i(TAG, "rotated → ${done.name} (${done.length()}B)")
-            else Log.w(TAG, "rotate rename failed for ${cf.name}")
+            if (cf.renameTo(done)) {
+                segmentCount++
+                Log.i(TAG, "rotated → ${done.name} (${done.length()}B)  totalSegments=$segmentCount")
+            } else {
+                Log.w(TAG, "rotate rename failed for ${cf.name}")
+            }
+        } else {
+            Log.d(TAG, "rotateLocked: nothing to rotate (current empty)")
         }
         openCurrent()
     }
 
     /** Forced rotation requested cross-user by UsbSyncService (via LogProvider.call). */
     fun forceRotate() {
-        synchronized(rotateLock) { if (currentBytes > 0) rotateLocked() }
+        synchronized(rotateLock) {
+            Log.i(TAG, "forceRotate requested (currentBytes=$currentBytes)")
+            if (currentBytes > 0) rotateLocked()
+        }
     }
 
     // ─── notification ────────────────────────────────────────────────────────
