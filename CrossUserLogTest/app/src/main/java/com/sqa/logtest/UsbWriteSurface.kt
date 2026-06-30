@@ -32,6 +32,13 @@ class UsbWriteSurface private constructor(private val dir: File) {
     companion object {
         const val TAG = "UsbWriteSurface"
 
+        /** Lightweight startup-scan check: is any removable volume mounted right now?
+         *  No write probe — use this to decide whether to kick UsbSyncService. */
+        fun isRemovableMounted(ctx: Context): Boolean {
+            val sm = ctx.getSystemService(StorageManager::class.java)
+            return sm.storageVolumes.any { it.isRemovable && it.state == Environment.MEDIA_MOUNTED }
+        }
+
         fun resolve(ctx: Context): UsbWriteSurface? {
             val sm = ctx.getSystemService(StorageManager::class.java)
             for (v in sm.storageVolumes) {

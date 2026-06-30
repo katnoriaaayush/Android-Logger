@@ -108,6 +108,25 @@ class MainActivity : AppCompatActivity() {
         super.onResume()
         refreshInfoPanel()
         startLivePreview()
+        ensureLoggerAndScanUsb()
+    }
+
+    /**
+     * USB-sync pathway bring-up:
+     *   • ensure the user-0 producer (LoggerService) is running — singleUser, so
+     *     it's routed to user 0 and self-stops if this activity is in another user;
+     *   • startup-scan for an already-mounted stick (the MEDIA_MOUNTED broadcast is
+     *     unreliable on modern Android) and kick UsbSyncService if one is present.
+     */
+    private fun ensureLoggerAndScanUsb() {
+        try {
+            startForegroundService(Intent(this, LoggerService::class.java))
+            if (UsbWriteSurface.isRemovableMounted(this)) {
+                startForegroundService(Intent(this, UsbSyncService::class.java))
+            }
+        } catch (e: Exception) {
+            android.util.Log.w("MainActivity", "USB-sync bring-up failed: ${e.message}")
+        }
     }
 
     override fun onPause() {
