@@ -25,6 +25,19 @@
     <!-- App usage stats (same data source as Digital Wellbeing); auto-granted for UID 1000 -->
     <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS" />
 
+    <!-- USB-sync pathway: open a user-0 ContentProvider FD from the foreground user -->
+    <uses-permission android:name="android.permission.INTERACT_ACROSS_USERS_FULL" />
+    <!-- Write completed log segments to the mounted removable (USB) volume -->
+    <uses-permission android:name="android.permission.WRITE_MEDIA_STORAGE" />
+
+    <!--
+        Signature permission guarding LogProvider — only this app's own
+        UsbSyncService (in any user) can reach the user-0 log files.
+    -->
+    <permission
+        android:name="com.sqa.logtest.permission.LOGS"
+        android:protectionLevel="signature" />
+
     <application
         android:allowBackup="false"
         android:label="CrossUserLogTest"
@@ -71,6 +84,56 @@
             android:name=".KpiEventService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+
+        <!-- ════════════ Cross-user log → USB sync pathway ════════════ -->
+
+        <!--
+            LoggerService — user-0 PRODUCER. UID+PID hybrid logcat capture →
+            rotated completed segments in dataDir/logs/. singleUser + gated on
+            user 0 so a secondary profile never spawns a second producer.
+        -->
+        <service
+            android:name=".LoggerService"
+            android:singleUser="true"
+            android:persistent="true"
+            android:directBootAware="true"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <!--
+            LogProvider — singleUser window onto completed log-*.log segments.
+            Exposes ParcelFileDescriptors (never paths) across the user boundary;
+            guarded by the signature permission above.
+        -->
+        <provider
+            android:name=".LogProvider"
+            android:authorities="com.sqa.logtest.logs"
+            android:singleUser="true"
+            android:exported="true"
+            android:permission="com.sqa.logtest.permission.LOGS" />
+
+        <!--
+            UsbSyncService — runs in the FOREGROUND user (the only one with the
+            USB mounted). Reads user-0 logs via content://0@… and streams them
+            to the stick; progress state lives in a manifest ON the stick.
+        -->
+        <service
+            android:name=".UsbSyncService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <!--
+            UsbMountReceiver — fires in the foreground user on media mount and
+            kicks off UsbSyncService.
+        -->
+        <receiver
+            android:name=".UsbMountReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MEDIA_MOUNTED" />
+                <data android:scheme="file" />
+            </intent-filter>
+        </receiver>
 
         <!--
             BootReceiver — starts LogCaptureService on boot.
