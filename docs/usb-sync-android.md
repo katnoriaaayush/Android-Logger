@@ -31,6 +31,28 @@ per logcat line (logcat -v uid,threadtime -b all):
 Output rotates `current.log → log-<ms>.log` at 256 KB or every 15 s. `current.log`
 is the active writer file and is **never** exposed by the provider.
 
+### Late-PID buffer
+
+The PID set lags the logcat stream: a just-started process logs before its PID
+appears in `amPidSet`, so its earliest lines would be dropped. To fix that, the
+UID filter runs immediately but the **PID decision is deferred**:
+
+```
+line → uid match?  ── no → drop now
+              yes → enqueue{line, pid, arrivalMs}   (only target-UID lines buffered)
+                    + if pid unknown, kick a throttled refreshPids()
+drain (FIFO): head aged ≥ BUFFER_MS (10s)?  → pid∈amPidSet ? write : drop
+```
+
+Each UID-matched line waits `BUFFER_MS` (10 s) before the PID check, giving
+`amPidSet` several refresh cycles (every 3 s) to learn the late PID. FIFO drain
+keeps output chronological; `MAX_BUFFER` caps memory; a final flush runs on stop.
+
+**Trade-off:** output lags real-time by ~`BUFFER_MS`, so the newest ~10 s of logs
+sit in the buffer and aren't in `current.log` yet — a pre-sync `forceRotate`
+captures everything older than that; the tail syncs on the next run. Tune via
+`BUFFER_MS`.
+
 ## Cross-user read (the only boundary crossing)
 
 ```

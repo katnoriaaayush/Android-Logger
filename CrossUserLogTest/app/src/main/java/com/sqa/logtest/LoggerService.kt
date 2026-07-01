@@ -45,6 +45,11 @@ class LoggerService : Service() {
         const val ROTATE_MS      = 15_000L          // …or after 15 s of new data
         const val PID_REFRESH_MS = 3_000L
 
+        const val BUFFER_MS        = 10_000L        // hold UID-matched lines this long before the PID decision
+        const val DRAIN_TICK_MS    = 200L           // drain poll when the queue head isn't ready yet
+        const val MAX_BUFFER       = 200_000        // safety cap on buffered lines (drops oldest beyond this)
+        const val KICK_THROTTLE_MS = 1_000L         // min gap between on-demand PID refresh kicks
+
         /** Set while the user-0 instance is alive; used by LogProvider.call("rotate"). */
         @Volatile var instance: LoggerService? = null
 
@@ -66,8 +71,21 @@ class LoggerService : Service() {
     private var lastRotateMs = 0L
 
     @Volatile private var totalLines = 0L     // every logcat line seen
-    @Volatile private var matchedLines = 0L   // lines that passed UID+PID filter
+    @Volatile private var matchedLines = 0L   // lines written (passed UID + delayed PID)
     @Volatile private var segmentCount = 0L   // completed segments produced
+
+    // ── time-delay buffer ────────────────────────────────────────────────────
+    // UID-matched lines wait BUFFER_MS before the PID decision so a PID that lands
+    // in amPidSet a few seconds late still claims its early lines. FIFO drain keeps
+    // output chronological. Only UID-matched lines are buffered (a small subset).
+    private class Buffered(val line: String, val pid: Int, val arrivalMs: Long)
+    private val buffer = java.util.ArrayDeque<Buffered>()
+    private val bufferLock = Any()
+    private var drainThread: Thread? = null
+    @Volatile private var bufferedCount = 0L
+    @Volatile private var droppedPidCount = 0L
+    @Volatile private var overflowDrops = 0L
+    @Volatile private var lastKickMs = 0L
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -93,7 +111,8 @@ class LoggerService : Service() {
             Log.i(TAG, "start uid=${android.os.Process.myUid()} user=$userId targetPkg=$TARGET_PKG targetAppId=$targetAppId logsDir=${logsDir(this).absolutePath}")
             if (targetAppId < 0) Log.w(TAG, "targetAppId unresolved — is $TARGET_PKG installed? capture will match nothing")
             openCurrent()
-            pidThread     = Thread(::pidLoop, "logger-pid").also { it.isDaemon = true; it.start() }
+            pidThread     = Thread(::pidLoop,     "logger-pid").also   { it.isDaemon = true; it.start() }
+            drainThread   = Thread(::drainLoop,   "logger-drain").also { it.isDaemon = true; it.start() }
             captureThread = Thread(::captureLoop, "logger-capture").also { it.isDaemon = true; it.start() }
         }
         return START_STICKY
@@ -106,8 +125,11 @@ class LoggerService : Service() {
         logcatProc?.destroy()
         captureThread?.interrupt()
         pidThread?.interrupt()
+        // let the drain thread do its final flush before we close the writer
+        drainThread?.interrupt()
+        try { drainThread?.join(2000) } catch (_: InterruptedException) {}
         synchronized(rotateLock) { current?.flush(); current?.close() }
-        Log.i(TAG, "onDestroy")
+        Log.i(TAG, "onDestroy written=$matchedLines buffered=$bufferedCount droppedPid=$droppedPidCount overflow=$overflowDrops")
     }
 
     // ─── PID set (UID+PID hybrid) ────────────────────────────────────────────
@@ -164,26 +186,76 @@ class LoggerService : Service() {
                 if (!running) return@forEachLine
                 totalLines++
                 val uid = uidRe.find(line)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: return@forEachLine
-                if (uid % 100_000 != targetAppId) return@forEachLine          // step 1: UID
+                if (uid % 100_000 != targetAppId) return@forEachLine          // UID pre-filter (timing-independent)
                 val pid = pidRe.find(line)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: return@forEachLine
-                if (pid !in amPidSet) {                                        // step 2: PID
-                    // UID matched but PID not verified — log occasionally so we can see
-                    // whether amPidSet is missing a process (the usual cross-user gotcha).
-                    if (totalLines % 5000 == 0L)
-                        Log.d(TAG, "drop: uid matched (appId=$targetAppId) but pid=$pid ∉ amPidSet=$amPidSet")
-                    return@forEachLine
-                }
                 val userId = uid / 100_000
-                writeLine("${if (userId == 0) "[owner]" else "[user$userId]"} $line")
-                matchedLines++
-                if (matchedLines % 100 == 0L)
-                    Log.d(TAG, "captured matched=$matchedLines total=$totalLines current=${currentFile?.name} bytes=$currentBytes segments=$segmentCount")
+                val prefixed = "${if (userId == 0) "[owner]" else "[user$userId]"} $line"
+
+                // Defer the PID decision — buffer the line so a PID that appears in
+                // amPidSet a few seconds late still claims its early lines.
+                synchronized(bufferLock) {
+                    buffer.addLast(Buffered(prefixed, pid, System.currentTimeMillis()))
+                    if (buffer.size > MAX_BUFFER) { buffer.removeFirst(); overflowDrops++ }
+                }
+                bufferedCount++
+
+                // If this PID isn't known yet, kick a throttled on-demand refresh so
+                // it's discovered well before the line ages out of the buffer.
+                if (pid !in amPidSet) {
+                    val now = System.currentTimeMillis()
+                    if (now - lastKickMs > KICK_THROTTLE_MS) {
+                        lastKickMs = now
+                        Thread { refreshPids() }.also { it.isDaemon = true }.start()
+                    }
+                }
             }
-            Log.i(TAG, "captureLoop ended (running=$running) matched=$matchedLines total=$totalLines")
+            Log.i(TAG, "captureLoop ended (running=$running) totalSeen=$totalLines buffered=$bufferedCount")
         } catch (e: Exception) {
             Log.e(TAG, "capture error: ${e.message}", e)
         }
     }
+
+    // ─── drain: apply the delayed PID decision in FIFO order ─────────────────
+
+    private fun drainLoop() {
+        while (running && !Thread.currentThread().isInterrupted) {
+            var processed = false
+            while (true) {
+                val ready = synchronized(bufferLock) {
+                    val head = buffer.peekFirst()
+                    if (head != null && System.currentTimeMillis() - head.arrivalMs >= BUFFER_MS)
+                        buffer.removeFirst() else null
+                } ?: break
+                evaluate(ready)
+                processed = true
+            }
+            if (!processed) {
+                try { Thread.sleep(DRAIN_TICK_MS) } catch (_: InterruptedException) { break }
+            }
+        }
+        drainRemaining()   // final flush with the latest amPidSet
+        Log.i(TAG, "drainLoop ended written=$matchedLines droppedPid=$droppedPidCount overflow=$overflowDrops")
+    }
+
+    private fun evaluate(b: Buffered) {
+        if (b.pid in amPidSet) {
+            writeLine(b.line)
+            matchedLines++
+            if (matchedLines % 100 == 0L)
+                Log.d(TAG, "written=$matchedLines buffered=$bufferedCount droppedPid=$droppedPidCount qsize=${queueSize()} current=${currentFile?.name} bytes=$currentBytes")
+        } else {
+            droppedPidCount++
+        }
+    }
+
+    private fun drainRemaining() {
+        while (true) {
+            val b = synchronized(bufferLock) { if (buffer.isEmpty()) null else buffer.removeFirst() } ?: break
+            evaluate(b)
+        }
+    }
+
+    private fun queueSize(): Int = synchronized(bufferLock) { buffer.size }
 
     // ─── rotating writer ─────────────────────────────────────────────────────
 
