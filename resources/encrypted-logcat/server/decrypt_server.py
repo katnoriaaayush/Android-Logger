@@ -6,8 +6,8 @@ Holds the RSA PRIVATE key (the only thing that can unlock). You pick a pulled
 .elog file in the browser; it's uploaded to this loopback-only server, decrypted,
 and the plaintext is shown back in the UI. Nothing leaves your machine.
 
-Setup:
-    pip install flask cryptography
+Setup (no Flask — pure standard library + cryptography):
+    pip install cryptography
     python decrypt_server.py                 # loads ./private_key.pem on 127.0.0.1:8734
     python decrypt_server.py mykey.pem 9000  # custom key path / port
 Then open http://127.0.0.1:8734
@@ -19,17 +19,17 @@ Crypto matches EncryptedLogWriter.kt exactly:
 
 import base64
 import hashlib
+import json
 import sys
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse, parse_qs
 
-from flask import Flask, request, jsonify, Response
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 HEADER_PREFIX = "ELOGv1|"
-
-app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 512 * 1024 * 1024  # 512 MB upload ceiling
+MAX_UPLOAD = 512 * 1024 * 1024  # 512 MB upload ceiling
 
 _PRIVATE_KEY = None
 _KEY_ID = "--------"
@@ -96,22 +96,52 @@ def decrypt_elog(data: bytes):
     return {"total": total, "decrypted": decrypted, "skipped": skipped, "lines": lines}
 
 
-@app.route("/")
-def index():
-    return Response(PAGE.replace("__KEYID__", _KEY_ID), mimetype="text/html")
+class Handler(BaseHTTPRequestHandler):
+    server_version = "logvault/1.0"
 
+    def _send(self, code, body: bytes, ctype: str):
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
-@app.route("/decrypt", methods=["POST"])
-def decrypt():
-    f = request.files.get("file")
-    if f is None:
-        return jsonify(error="No file received. Pick a .elog file and try again."), 400
-    try:
-        result = decrypt_elog(f.read())
-    except Exception as e:
-        return jsonify(error=f"Could not read this file as an .elog: {type(e).__name__}"), 400
-    result["filename"] = f.filename
-    return jsonify(result)
+    def _json(self, code, obj):
+        self._send(code, json.dumps(obj).encode("utf-8"), "application/json")
+
+    def do_GET(self):
+        if urlparse(self.path).path == "/":
+            html = PAGE.replace("__KEYID__", _KEY_ID).encode("utf-8")
+            self._send(200, html, "text/html; charset=utf-8")
+        else:
+            self._json(404, {"error": "not found"})
+
+    # The browser POSTs the raw file bytes as the request body (no multipart form,
+    # so no Flask/werkzeug needed); the filename rides along as the ?name= param.
+    def do_POST(self):
+        parsed = urlparse(self.path)
+        if parsed.path != "/decrypt":
+            self._json(404, {"error": "not found"})
+            return
+        length = int(self.headers.get("Content-Length") or 0)
+        if length <= 0:
+            self._json(400, {"error": "No file received. Pick a .elog file and try again."})
+            return
+        if length > MAX_UPLOAD:
+            self._json(413, {"error": "File too large (>512 MB)."})
+            return
+        data = self.rfile.read(length)
+        filename = (parse_qs(parsed.query).get("name") or ["upload.elog"])[0]
+        try:
+            result = decrypt_elog(data)
+        except Exception as e:
+            self._json(400, {"error": f"Could not read this file as an .elog: {type(e).__name__}"})
+            return
+        result["filename"] = filename
+        self._json(200, result)
+
+    def log_message(self, *args):
+        pass  # keep the console quiet
 
 
 PAGE = r"""<!DOCTYPE html>
@@ -361,8 +391,7 @@ $("#unlock").onclick = async ()=>{
   const btn=$("#unlock"); const label=btn.textContent;
   btn.disabled=true; btn.innerHTML='<span class="spin"></span>Unlocking…';
   try{
-    const fd=new FormData(); fd.append("file",chosenFile);
-    const res=await fetch("/decrypt",{method:"POST",body:fd});
+    const res=await fetch("/decrypt?name="+encodeURIComponent(chosenFile.name),{method:"POST",body:chosenFile});
     const data=await res.json();
     if(!res.ok){ showError(data.error||"Decryption failed."); return; }
     allLines=data.lines;
@@ -429,4 +458,9 @@ if __name__ == "__main__":
                  f"Generate it with KeyGen.kt, or pass a path: python decrypt_server.py <key.pem> [port]")
     print(f"logvault decrypt server  ->  http://127.0.0.1:{port}")
     print(f"key loaded: ····{_KEY_ID}   (loopback only — decrypted output never leaves this machine)")
-    app.run(host="127.0.0.1", port=port, debug=False)
+    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nshutting down")
+        server.shutdown()

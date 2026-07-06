@@ -104,7 +104,7 @@ adb exec-out run-as <pkg> cat files/logs/session-XXXX.elog > session-XXXX.elog
 ## Step 4 — Decrypt (web UI, recommended)
 ```bash
 cd server
-pip install flask cryptography
+pip install cryptography                  # no Flask — uses the stdlib http.server
 python decrypt_server.py                 # loads ./private_key.pem on 127.0.0.1:8734
 # python decrypt_server.py mykey.pem 9000  # custom key path / port
 ```
