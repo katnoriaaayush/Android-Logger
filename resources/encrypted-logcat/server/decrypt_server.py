@@ -344,7 +344,8 @@ PAGE = r"""<!DOCTYPE html>
       </div>
       <label class="toggle"><input type="checkbox" id="lntoggle" checked> line numbers</label>
       <button class="btn" id="copy">Copy</button>
-      <button class="btn" id="download">Download</button>
+      <button class="btn" id="dl-csv">Download CSV</button>
+      <button class="btn" id="dl-txt">Download TXT</button>
     </div>
     <div class="viewer">
       <div class="cap" id="cap"></div>
@@ -436,13 +437,54 @@ $("#copy").onclick = async ()=>{
   await navigator.clipboard.writeText(plainText());
   const b=$("#copy"); b.textContent="Copied"; setTimeout(()=>b.textContent="Copy",1200);
 };
-$("#download").onclick = ()=>{
-  const blob=new Blob([plainText()],{type:"text/plain"});
+function baseName(){ return chosenFile ? chosenFile.name.replace(/\.elog$/,"") : "logs"; }
+function saveBlob(text, filename, mime){
+  const blob=new Blob([text],{type:mime});
   const a=document.createElement("a");
   a.href=URL.createObjectURL(blob);
-  a.download=(chosenFile?chosenFile.name.replace(/\.elog$/,""):"logs")+".decrypted.txt";
+  a.download=filename;
   a.click(); URL.revokeObjectURL(a.href);
-};
+}
+
+// Minimal RFC-4180-ish CSV parser: quoted fields, "" escapes, commas/newlines
+// inside quotes, CRLF or LF row endings.
+function parseCSV(text){
+  const rows=[]; let row=[], field="", inQ=false;
+  for(let i=0;i<text.length;i++){
+    const c=text[i];
+    if(inQ){
+      if(c === '"'){ if(text[i+1] === '"'){ field+='"'; i++; } else inQ=false; }
+      else field+=c;
+    } else {
+      if(c === '"') inQ=true;
+      else if(c === ',') { row.push(field); field=""; }
+      else if(c === '\n'){ row.push(field); rows.push(row); row=[]; field=""; }
+      else if(c === '\r'){ /* handled with \n */ }
+      else field+=c;
+    }
+  }
+  if(field.length || row.length){ row.push(field); rows.push(row); }
+  return rows;
+}
+
+// CSV -> aligned, readable plaintext table (header + rule + column-padded rows).
+// Falls back to the raw text if the content isn't really tabular.
+function csvToReadableTxt(csvText){
+  const rows=parseCSV(csvText).filter(r => r.length && !(r.length===1 && r[0]===""));
+  if(rows.length===0) return csvText;
+  const cols=Math.max(...rows.map(r=>r.length));
+  if(cols<=1) return csvText;
+  const width=new Array(cols).fill(0);
+  rows.forEach(r=>{ for(let i=0;i<cols;i++) width[i]=Math.max(width[i],(r[i]||"").length); });
+  const pad=(s,w)=> s + " ".repeat(Math.max(0,w-s.length));
+  const line=r=> r.map((v,i)=>pad(v||"",width[i])).join("  ").replace(/\s+$/,"");
+  const out=[ line(rows[0]), width.map(w=>"─".repeat(w)).join("  ") ];
+  for(let i=1;i<rows.length;i++) out.push(line(rows[i]));
+  return out.join("\n")+"\n";
+}
+
+$("#dl-csv").onclick = ()=> saveBlob(plainText(), baseName()+".decrypted.csv", "text/csv");
+$("#dl-txt").onclick = ()=> saveBlob(csvToReadableTxt(plainText()), baseName()+".decrypted.txt", "text/plain");
 </script>
 </body>
 </html>"""

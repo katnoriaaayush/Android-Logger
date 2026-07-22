@@ -109,9 +109,10 @@ python decrypt_server.py                 # loads ./private_key.pem on 127.0.0.1:
 # python decrypt_server.py mykey.pem 9000  # custom key path / port
 ```
 Open **http://127.0.0.1:8734**, choose the pulled `.elog` (native file picker or
-drag-and-drop), and hit **Unlock**. You get line counts, a filter box, and copy/
-download of the plaintext. The header shows a short **key fingerprint** so you can
-confirm which private key is loaded.
+drag-and-drop), and hit **Unlock**. You get line counts, a filter box, and two
+download options — **Download CSV** (the raw decrypted CSV, spreadsheet-ready) and
+**Download TXT** (the CSV parsed into an aligned, human-readable table). The header
+shows a short **key fingerprint** so you can confirm which private key is loaded.
 
 Put `private_key.pem` in the `server/` folder (or pass its path as the first arg).
 
